@@ -1,0 +1,88 @@
+{
+  "sourceRepository": "https://github.com/kassent/mhwilds",
+  "sourceCommit": "85aaed8c5fb8a6aa8351fcf9485436d8f66f4cb9",
+  "commonCommit": "e7f816cef21dbe7db5bd2cbb0173269aaaa49093",
+  "files": {
+    "plugins/UserDataExtension/CMakeLists.txt": {
+      "sha256": "9e3ccb7d04354165f1789792c77e8707084e949da20163fa92a087887011b03e",
+      "adapted": true
+    },
+    "plugins/UserDataExtension/Plugin.cpp": {
+      "sha256": "66b407581f8975f14984f2323aae05d2942b28638ac431298d69c0e75b37daf6",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataCollection.cpp": {
+      "sha256": "50604ab0d82219aac41981d89fd82ac90e7cd00fd597a2b693ba707edec9fb7e",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataCollection.h": {
+      "sha256": "0daf07169c8a7cd3b75d5e0f429a8410ffccf380db19aea7fce0e3212abc98ab",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataConfiguration.cpp": {
+      "sha256": "606e3e38ed2ec64bf620a3a1b01f7cde5d9becbc91134e128873003c04c0d1a8",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataConfiguration.h": {
+      "sha256": "0f7121bd2c3c761fc25f8293fc193b2b0761ad739b7090bbc2bbbbcb3265ac3b",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataExtension.h": {
+      "sha256": "f5eba2e745e613751c8728676546c2d493c6ea8bf44280f358d46797eb4e6afa",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataFieldPath.cpp": {
+      "sha256": "c679045a109a827078c19e66f1d5888517ca37f799a369960f441c6a1d0e352e",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataFieldPath.h": {
+      "sha256": "302dbaf85289d2f5481239d9eaf4d9580e7bcb9d8c3e9720574edf181c8a2886",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataLoading.cpp": {
+      "sha256": "ca5b785d69fe36ee0b61f0876d02caf27a9a3c9cb7522cb8611d4d3a8492413c",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataLoading.h": {
+      "sha256": "23e2c6210e55da69497a037f1f7aa7de85efc8cef58f358b4cd65520e1a67139",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataObjectBuilder.cpp": {
+      "sha256": "0b2b8a6117d6c8c2d09f7d9c989076603d103435c6424c054331a3e7e2a86f94",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataObjectBuilder.h": {
+      "sha256": "ee36310eb4aef37398044f4d88d958eb5a901bbe90abe206fcc07404dbc5c9d2",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataPatchExecutor.cpp": {
+      "sha256": "25004b5b20fba02910c2b15fad98fe9bbe4089156c5d53530ab553eb97b4b625",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataPatchExecutor.h": {
+      "sha256": "2f9366362412ad702537011bacd84e9ae88c0f540446833786ff057132b0951e",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataRegistrationTests.cpp": {
+      "sha256": "4b3bf61cbd8c671db4841e3cd6a5284a65679ffba1db1cc055870e46afd21ced",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataSmallValueChecks.h": {
+      "sha256": "e8e70d94c4cff1799b270407fd1e4369b3a186e088d9debf1e392b4cfd44a313",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/UserDataSmallValueProbe.cpp": {
+      "sha256": "e919f7b2426e5329e2a222e320a881952db897aa862c760384772a52ca4a4f25",
+      "adapted": false
+    },
+    "plugins/UserDataExtension/examples/water-gun.json": {
+      "sha256": "030707f88c968c7dcbe5a9f1b512af29d08177cc3a6d0a89e57a3daeff7ecd2d",
+      "adapted": false
+    },
+    "plugins/ClassInjector/include/ClassProvider.h": {
+      "sha256": "13c42f2a21c4ec08a43427cdf0a9278d7016841e95d56e883806f73baff9f0c7",
+      "adapted": false
+    }
+  },
+  "hashNormalization": "CRLF to LF"
+}

@@ -1,6 +1,7 @@
 # UserDataExtension Developer Guide
 
 [English](README.md) | [简体中文](README.zh-CN.md)
+[Build from source / 从源码构建](BUILDING.md)
 
 **Describe data changes in JSON so that multiple mods can extend the same native USER incrementally.**
 

@@ -1,0 +1,16 @@
+{
+  "format": "UserDataExtension/v1",
+  "extensions": [
+    {
+      "target": "GameDesign/Player/ActionData/Common/GlobalParam/PlayerGlobalParam.user",
+      "patches": [
+        {
+          "app.user_data.PlayerGlobalParam": {
+            "_GestureWaterGunMaxAmmo": { "op": "set", "value": 255 },
+            "_GestureWaterGun_Range": { "op": "set", "value": 80.0 }
+          }
+        }
+      ]
+    }
+  ]
+}

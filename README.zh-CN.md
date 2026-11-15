@@ -1,6 +1,7 @@
 # UserDataExtension 开发者指南
 
 [English](README.md) | [简体中文](README.zh-CN.md)
+[Build from source / 从源码构建](BUILDING.md)
 
 **用 JSON 描述需要改变的数据，让多个 Mod 在同一份原生 USER 上进行增量扩展。**
 

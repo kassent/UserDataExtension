@@ -1,0 +1,10 @@
+{
+  "name": "userdataextension",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "spdlog",
+    "fmt",
+    "nlohmann-json",
+    "zlib"
+  ]
+}
