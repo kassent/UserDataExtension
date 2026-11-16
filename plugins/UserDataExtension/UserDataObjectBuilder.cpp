@@ -11,19 +11,17 @@
 
 namespace UserDataExtension {
 using Json = nlohmann::json;
-using Fnset_Standby = void (*)(void*, void*, bool);
+using Fnset_Standby = void (*)(void* vmContext, void* prefab, bool standby);
 
 // 固定元数据在 CI-ready 后首次使用时缓存，随已发布 TDB 保持进程期有效。
 // JSON 指定的类型和实际对象字段仍按本次声明/实例查询，不共用首次结果。
 
 // 判断受支持整数或枚举是否按无符号 payload 处理；Char 按 UInt16 语义处理。
 // 枚举取 CLR underlying element 编码，不把该编码误当成 TDB 类型 ID。
-bool IsUnsignedInteger(const ci::ProviderContext& context, const ci::Type* type) {
-    if (context.IsEnum(type)) {
-        const auto elementType = static_cast<via::clr::ElementType>(type->underlyingTypeIndex);
-        return elementType == via::clr::ElementType::U1 || elementType == via::clr::ElementType::U2 || elementType == via::clr::ElementType::U4 || elementType == via::clr::ElementType::U8;
-    }
-    static const ci::Type* const unsignedTypes[]{context.GetType("System.Byte"), context.GetType("System.UInt16"), context.GetType("System.UInt32"), context.GetType("System.UInt64"), context.GetType("System.Char")};
+bool IsUnsignedInteger(const ci::SDKAPI& context, ci::TypeDefinitionHandle type) {
+    if (context.type_definition->is_enum(type))
+        type = context.type_definition->get_underlying_type(type);
+    static ci::TypeDefinitionHandle const unsignedTypes[]{context.tdb->find_type("System.Byte"), context.tdb->find_type("System.UInt16"), context.tdb->find_type("System.UInt32"), context.tdb->find_type("System.UInt64"), context.tdb->find_type("System.Char")};
     for (const auto* unsignedType : unsignedTypes)
         if (type == unsignedType)
             return true;
@@ -32,49 +30,37 @@ bool IsUnsignedInteger(const ci::ProviderContext& context, const ci::Type* type)
 
 // 返回 v1 支持的基础标量、枚举或 Guid 的 payload 字节数，用于字段和集合布局检查。
 // 复杂结构体不猜步长；未知标量或枚举底层编码直接抛异常。
-uint32_t GetScalarSize(const ci::ProviderContext& context, const ci::Type* type) {
+uint32_t GetScalarSize(const ci::SDKAPI& context, ci::TypeDefinitionHandle type) {
     if (!type)
         throw std::runtime_error("value type is missing");
-    static const std::pair<const ci::Type*, size_t> scalarTypes[]{
-        {context.GetType("System.Guid"), sizeof(RE::SystemGuid)},
-        {context.GetType("System.Boolean"), sizeof(bool)},
-        {context.GetType("System.Byte"), sizeof(uint8_t)},
-        {context.GetType("System.SByte"), sizeof(int8_t)},
-        {context.GetType("System.Int16"), sizeof(int16_t)},
-        {context.GetType("System.UInt16"), sizeof(uint16_t)},
-        {context.GetType("System.Char"), sizeof(char16_t)},
-        {context.GetType("System.Int32"), sizeof(int32_t)},
-        {context.GetType("System.UInt32"), sizeof(uint32_t)},
-        {context.GetType("System.Single"), sizeof(float)},
-        {context.GetType("System.Int64"), sizeof(int64_t)},
-        {context.GetType("System.UInt64"), sizeof(uint64_t)},
-        {context.GetType("System.Double"), sizeof(double)}};
+    static const std::pair<ci::TypeDefinitionHandle, size_t> scalarTypes[]{
+        {context.tdb->find_type("System.Guid"), sizeof(RE::SystemGuid)},
+        {context.tdb->find_type("System.Boolean"), sizeof(bool)},
+        {context.tdb->find_type("System.Byte"), sizeof(uint8_t)},
+        {context.tdb->find_type("System.SByte"), sizeof(int8_t)},
+        {context.tdb->find_type("System.Int16"), sizeof(int16_t)},
+        {context.tdb->find_type("System.UInt16"), sizeof(uint16_t)},
+        {context.tdb->find_type("System.Char"), sizeof(char16_t)},
+        {context.tdb->find_type("System.Int32"), sizeof(int32_t)},
+        {context.tdb->find_type("System.UInt32"), sizeof(uint32_t)},
+        {context.tdb->find_type("System.Single"), sizeof(float)},
+        {context.tdb->find_type("System.Int64"), sizeof(int64_t)},
+        {context.tdb->find_type("System.UInt64"), sizeof(uint64_t)},
+        {context.tdb->find_type("System.Double"), sizeof(double)}};
     for (const auto& [scalarType, size] : scalarTypes)
         if (type == scalarType)
             return uint32_t(size);
-    if (context.IsEnum(type)) {
-        // I/U 分别表示有符号/无符号整数，后缀是字节宽度；不可用该编码索引类型表。
-        switch (static_cast<via::clr::ElementType>(type->underlyingTypeIndex)) {
-        case via::clr::ElementType::I1:
-        case via::clr::ElementType::U1:
-            return sizeof(int8_t);
-        case via::clr::ElementType::I2:
-        case via::clr::ElementType::U2:
-            return sizeof(int16_t);
-        case via::clr::ElementType::I4:
-        case via::clr::ElementType::U4:
-            return sizeof(int32_t);
-        case via::clr::ElementType::I8:
-        case via::clr::ElementType::U8:
-            return sizeof(int64_t);
-        }
+    if (context.type_definition->is_enum(type)) {
+        const auto underlying = context.type_definition->get_underlying_type(type);
+        if (underlying)
+            return GetScalarSize(context, underlying);
     }
     throw std::runtime_error("unsupported scalar/array element layout");
 }
 
 // 首次使用时绑定少量高频纯值类型；仅对命中的类型检查布局，不影响未使用的可选类型。
 // 描述表是支持政策，实际 payload/步长仍由 CI 元数据决定，不把任意小结构当成纯值。
-const SupportedValueLayout* FindSupportedValueLayout(const ci::ProviderContext& context, const ci::Type* type) {
+const SupportedValueLayout* FindSupportedValueLayout(const ci::SDKAPI& context, ci::TypeDefinitionHandle type) {
     struct Description {
         const char* name;
         std::array<const char*, 4> members;
@@ -99,14 +85,14 @@ const SupportedValueLayout* FindSupportedValueLayout(const ci::ProviderContext& 
         std::vector<SupportedValueLayout> result;
         result.reserve(std::size(descriptions));
         for (const auto& description : descriptions) {
-            const auto* valueType = context.GetType(description.name);
+            const auto* valueType = context.tdb->find_type(description.name);
             if (!valueType)
                 continue;
-            SupportedValueLayout layout{.type = valueType, .size = context.GetValueTypeSize(valueType), .nullable = description.nullable};
+            SupportedValueLayout layout{.type = valueType, .size = context.type_definition->get_valuetype_size(valueType), .nullable = description.nullable};
             for (const auto* name : description.members) {
                 if (!name)
                     break;
-                layout.members[layout.memberCount++] = context.GetFieldLayout(valueType, name);
+                layout.members[layout.memberCount++] = ci::API::TypeDefinition{&context, valueType}.find_field(name);
             }
             result.push_back(layout);
         }
@@ -118,8 +104,12 @@ const SupportedValueLayout* FindSupportedValueLayout(const ci::ProviderContext& 
         if (!layout.size || layout.size > sizeof(RE::SystemGuid))
             throw std::runtime_error("supported value exceeds the 16-byte layout contract");
         for (uint32_t index = 0; index < layout.memberCount; ++index) {
-            const auto* field = layout.members[index];
-            if (!field || !field->valueSize || GetScalarSize(context, field->type) != field->valueSize || uint64_t(field->valueOffset) + field->valueSize > layout.size)
+            const auto field = layout.members[index];
+            if (!field || field.is_static())
+                throw std::runtime_error("supported value member layout mismatch");
+            const auto fieldType = field.get_type();
+            const auto size = fieldType.get_valuetype_size();
+            if (!size || GetScalarSize(context, fieldType.handle) != size || uint64_t(field.get_offset_from_fieldptr()) + size > layout.size)
                 throw std::runtime_error("supported value member layout mismatch");
         }
         return &layout;
@@ -128,7 +118,7 @@ const SupportedValueLayout* FindSupportedValueLayout(const ci::ProviderContext& 
 }
 
 // 新增整值/集合入口使用此查询；标量转换、算术及业务 key 仍保留 GetScalarSize 的限制。
-uint32_t GetSupportedValueSize(const ci::ProviderContext& context, const ci::Type* type) {
+uint32_t GetSupportedValueSize(const ci::SDKAPI& context, ci::TypeDefinitionHandle type) {
     if (const auto* layout = FindSupportedValueLayout(context, type))
         return layout->size;
     return GetScalarSize(context, type);
@@ -173,26 +163,26 @@ static void WriteInteger(void* address, const Json& value) {
 // 释放构造器拥有的外部 USER 请求引用；普通新建托管对象不在这里逐一释放。
 ObjectBuilder::~ObjectBuilder() {
     for (auto* object : ownedUserDataRequests)
-        context.Release(object);
+        context.managed_object->release(object);
 }
 
 // 按目标字段类型把 JSON 写成引用或值 payload；转换失败抛异常，不默默截断。
 // 依次处理引用、Guid、内嵌字段字典/vec3 bytes、Boolean、浮点和有界整数。
 // 已发布引用必须传真实 owner 并走 AssignReference；owner=null 仅用于未发布数组或准备缓冲。
-void ObjectBuilder::WriteValue(void* owner, void* destination, const ci::Type* type, uint32_t valueSize, const Json& value, std::optional<int32_t> elementIndex) {
+void ObjectBuilder::WriteValue(void* owner, void* destination, ci::TypeDefinitionHandle type, uint32_t valueSize, const Json& value, std::optional<int32_t> elementIndex) {
     if (!type || !destination)
         throw std::runtime_error("value destination/type missing");
-    static const auto* int32Type = context.GetType("System.Int32");
-    static const auto* guidType = context.GetType("System.Guid");
-    static const auto* vec3Type = context.GetType("via.vec3");
-    static const auto* booleanType = context.GetType("System.Boolean");
-    static const auto* singleType = context.GetType("System.Single");
-    static const auto* doubleType = context.GetType("System.Double");
+    static const auto* int32Type = context.tdb->find_type("System.Int32");
+    static const auto* guidType = context.tdb->find_type("System.Guid");
+    static const auto* vec3Type = context.tdb->find_type("via.vec3");
+    static const auto* booleanType = context.tdb->find_type("System.Boolean");
+    static const auto* singleType = context.tdb->find_type("System.Single");
+    static const auto* doubleType = context.tdb->find_type("System.Double");
     if (!valueSize) {
         // 引用结果先构造完成：真实字段走写屏障，准备区/新数组只填尚未发布的槽。
         auto* object = CreateObject(type, value, elementIndex);
         if (owner) {
-            if (!context.AssignReference(owner, static_cast<void**>(destination), object))
+            if (!context.managed_object->assign_reference(owner, static_cast<void**>(destination), object))
                 throw std::runtime_error("reference assignment failed");
         } else {
             *static_cast<void**>(destination) = object;
@@ -235,14 +225,18 @@ void ObjectBuilder::WriteValue(void* owner, void* destination, const ci::Type* t
             memcpy(destination, bytes, valueSize);
             return;
         }
-        if (value.size() != 1 || context.GetType(value.begin().key().c_str()) != type || !value.begin().value().is_object())
+        if (value.size() != 1 || context.tdb->find_type(value.begin().key().c_str()) != type || !value.begin().value().is_object())
             throw std::runtime_error("inline value requires its exact type key and field dictionary");
         // 内嵌结构体只移动 payload 地址；其引用字段仍属于外层真实 managed owner。
         for (const auto& [name, child] : value.begin().value().items()) {
-            const auto* field = context.GetFieldLayout(type, name.c_str());
-            if (!field || uint64_t(field->valueOffset) + (field->valueSize ? field->valueSize : sizeof(void*)) > valueSize)
+            const auto field = ci::API::TypeDefinition{&context, type}.find_field(name.c_str());
+            if (!field || field.is_static())
                 throw std::runtime_error("inline field exceeds value layout: " + name);
-            WriteValue(owner, static_cast<uint8_t*>(destination) + field->valueOffset, field->type, field->valueSize, child, elementIndex);
+            const auto fieldType = field.get_type();
+            const auto fieldSize = fieldType.get_valuetype_size();
+            if (uint64_t(field.get_offset_from_fieldptr()) + (fieldSize ? fieldSize : sizeof(void*)) > valueSize)
+                throw std::runtime_error("inline field exceeds value layout: " + name);
+            WriteValue(owner, field.get_data_raw(destination, true), fieldType.handle, fieldSize, child, elementIndex);
         }
         return;
     }
@@ -305,31 +299,31 @@ void ObjectBuilder::WriteValue(void* owner, void* destination, const ci::Type* t
 // 按期望引用类型构造字符串、资源 holder、数组/List 或带类型键的托管对象。
 // 先完整填充新集合/对象，再交调用方持有或发布；不额外调用通用构造函数或隐式 retain。
 // $uri 只发起外部 USER 请求并由本构造器持有，不保证内容已解码；Prefab 路径引用另按原生布局处理。
-void* ObjectBuilder::CreateObject(const ci::Type* expectedType, const Json& value, std::optional<int32_t> elementIndex) {
+void* ObjectBuilder::CreateObject(ci::TypeDefinitionHandle expectedType, const Json& value, std::optional<int32_t> elementIndex) {
     if (!expectedType)
         throw std::runtime_error("expected reference type missing");
-    static const auto* stringType = context.GetType("System.String");
-    static const auto* resourceHolderType = context.GetType("via.ResourceHolder");
-    static const auto* userDataType = context.GetType("via.UserData");
-    static const auto* prefabType = context.GetType("via.Prefab");
+    static const auto* stringType = context.tdb->find_type("System.String");
+    static const auto* resourceHolderType = context.tdb->find_type("via.ResourceHolder");
+    static const auto* userDataType = context.tdb->find_type("via.UserData");
+    static const auto* prefabType = context.tdb->find_type("via.Prefab");
     if (value.is_null())
         return nullptr;
-    if (expectedType->objectType == std::to_underlying(via::clr::VMObjType::ValType))
+    if (context.type_definition->is_valuetype(expectedType))
         throw std::runtime_error("value type is not an object reference");
     if (expectedType == stringType) {
         const auto text = value.get<std::string>();
-        auto* result = context.CreateString(vmContext, text.c_str());
+        auto* result = context.managed_object->create_string(vmContext, text.c_str());
         if (!result)
             throw std::runtime_error("string allocation failed");
         return result;
     }
-    if (context.IsDerivedFrom(expectedType, resourceHolderType)) {
-        if (!context.CreateResourceHolder || !value.is_string())
+    if (context.type_definition->is_derived_from(expectedType, resourceHolderType)) {
+        if (!context.resource_manager->create_resource_holder || !value.is_string())
             throw std::runtime_error("resource holder requires a path string");
         const auto path = value.get<std::string>();
         if (path.empty() || path.contains('\0'))
             throw std::runtime_error("invalid resource path");
-        auto* holder = context.CreateResourceHolder(vmContext, expectedType, path.c_str());
+        auto* holder = context.resource_manager->create_resource_holder(vmContext, expectedType, path.c_str());
         if (!holder)
             throw std::runtime_error("resource holder creation failed: " + path);
         return holder;
@@ -341,7 +335,7 @@ void* ObjectBuilder::CreateObject(const ci::Type* expectedType, const Json& valu
         const auto* elementType = layout.elementType;
         const auto valueSize = layout.valueSize;
         const auto stride = layout.stride;
-        auto* array = static_cast<RE::SystemArray<uint8_t>*>(context.CreateArray(vmContext, elementType, value.size(), false));
+        auto* array = static_cast<RE::SystemArray<uint8_t>*>(context.managed_object->create_array(vmContext, elementType, value.size(), false));
         if (!array || array == vmContext || array->contained_type != elementType || array->count != value.size())
             throw std::runtime_error("array allocation/type contract failed");
         // 先填满新数组再发布给 List/调用者，使首次 retain 时可扫描到完整引用元素。
@@ -349,79 +343,83 @@ void* ObjectBuilder::CreateObject(const ci::Type* expectedType, const Json& valu
             WriteValue(nullptr, array->elements + stride * i, elementType, valueSize, value[i], int32_t(i));
         if (!layout.itemsField)
             return array;
-        auto* list = context.CreateInstance(vmContext, expectedType, false);
+        auto* list = context.managed_object->create_instance(vmContext, expectedType, false);
         if (!list)
             throw std::runtime_error("List allocation/layout failed");
-        if (!context.AssignReference(list, context.GetField<void*>(list, layout.itemsField), array))
+        if (!context.managed_object->assign_reference(list, &layout.itemsField.get_data<void*>(list), array))
             throw std::runtime_error("List items assignment failed");
-        *context.GetField<int32_t>(list, layout.sizeField) = int32_t(value.size());
+        layout.sizeField.get_data<int32_t>(list) = int32_t(value.size());
         return list;
     }
     if (!value.is_object() || value.size() != 1 || !value.begin().value().is_object())
         throw std::runtime_error("object requires one type key and a field dictionary");
     const auto& typeName = value.begin().key();
-    const auto* type = context.GetType(typeName.c_str());
-    if (!context.IsDerivedFrom(type, expectedType) || type->objectType == std::to_underlying(via::clr::VMObjType::ValType) || type->objectType == std::to_underlying(via::clr::VMObjType::Array))
+    const auto* type = context.tdb->find_type(typeName.c_str());
+    if (!context.type_definition->is_derived_from(type, expectedType) || context.type_definition->is_valuetype(type) || context.type_definition->is_array(type))
         throw std::runtime_error("reference type mismatch: " + typeName);
     const auto& fields = value.begin().value();
     if (fields.contains("$uri")) {
-        if (fields.size() != 1 || !fields.at("$uri").is_string() || !context.IsDerivedFrom(type, userDataType) || !context.CreateUserData)
+        if (fields.size() != 1 || !fields.at("$uri").is_string() || !context.type_definition->is_derived_from(type, userDataType) || !context.resource_manager->create_userdata)
             throw std::runtime_error("$uri requires a USER type and must not mix with fields");
         const auto path = fields.at("$uri").get<std::string>();
         if (path.empty() || path.contains('\0'))
             throw std::runtime_error("invalid external USER path");
-        auto* object = context.CreateUserData(type, path.c_str());
+        auto* object = context.resource_manager->create_userdata(type, path.c_str());
         if (!object)
             throw std::runtime_error("external USER request failed: " + path);
         // 工厂已交出一份 owned 引用，构造器负责归还；调用方若要跨批保存须另行持有。
         ownedUserDataRequests.push_back(object);
         return object;
     }
-    auto* object = context.CreateInstance(vmContext, type, false);
+    auto* object = context.managed_object->create_instance(vmContext, type, false);
     if (!object)
         throw std::runtime_error("object allocation failed: " + typeName);
-    const auto* createdType = context.GetInstanceType(object);
+    const auto* createdType = context.managed_object->get_type_definition(object);
     if (createdType != type)
         throw std::runtime_error("instance allocator returned a different type: " + typeName);
     if (type == prefabType) {
-        static const auto set_Standby = reinterpret_cast<Fnset_Standby>(context.GetMethod(prefabType, "set_Standby(System.Boolean)"));
+        static const auto set_Standby = ci::API::TypeDefinition{&context, prefabType}.find_method("set_Standby(System.Boolean)").get_function<Fnset_Standby>();
         if (!set_Standby || fields.size() != 2 || !fields.contains("Path") || !fields.contains("Standby") || !fields.at("Standby").is_boolean())
             throw std::runtime_error("Prefab requires Standby and Path");
         set_Standby(vmContext, object, false);
         auto* path = CreateObject(stringType, fields.at("Path"));
-        context.Retain(path); // 原生 +0x18 不是 GC 扫描的托管字段。
+        context.managed_object->add_ref(path); // 原生 +0x18 不是 GC 扫描的托管字段。
         static_cast<RE::REPrefab*>(object)->path = static_cast<RE::SystemString*>(path);
         if (fields.at("Standby").get<bool>())
             set_Standby(vmContext, object, true);
         return object;
     }
     for (const auto& [name, child] : fields.items()) {
-        const auto* field = context.GetFieldLayout(type, name.c_str());
-        if (!field || name.starts_with('$'))
+        const auto field = ci::API::TypeDefinition{&context, type}.find_field(name.c_str());
+        if (!field || field.is_static() || name.starts_with('$'))
             throw std::runtime_error("instance field missing: " + typeName + "." + name);
-        WriteValue(object, context.GetField(object, field), field->type, field->valueSize, child, elementIndex);
+        WriteValue(object, field.get_data_raw(object), field.get_type().handle, field.get_type().get_valuetype_size(), child, elementIndex);
     }
     return object;
 }
 
 // 在元数据阶段递归检查 JSON 与目标字段/集合类型是否兼容，不创建托管对象或请求资源。
 // 标量复用真实转换规则写入局部缓冲；引用只校验派生关系、字段、资源路径和所需 CI 能力。
-void ValidateJsonValue(const ci::ProviderContext& context, const ci::Type* type, uint32_t valueSize, const Json& value, std::optional<int32_t> elementIndex) {
+void ValidateJsonValue(const ci::SDKAPI& context, ci::TypeDefinitionHandle type, uint32_t valueSize, const Json& value, std::optional<int32_t> elementIndex) {
     if (!type)
         throw std::runtime_error("JSON target type missing");
-    static const auto* stringType = context.GetType("System.String");
-    static const auto* resourceHolderType = context.GetType("via.ResourceHolder");
-    static const auto* userDataType = context.GetType("via.UserData");
-    static const auto* prefabType = context.GetType("via.Prefab");
+    static const auto* stringType = context.tdb->find_type("System.String");
+    static const auto* resourceHolderType = context.tdb->find_type("via.ResourceHolder");
+    static const auto* userDataType = context.tdb->find_type("via.UserData");
+    static const auto* prefabType = context.tdb->find_type("via.Prefab");
     if (valueSize) {
         if (value.is_object() && !value.contains("bytes")) {
-            if (value.size() != 1 || context.GetType(value.begin().key().c_str()) != type || !value.begin().value().is_object())
+            if (value.size() != 1 || context.tdb->find_type(value.begin().key().c_str()) != type || !value.begin().value().is_object())
                 throw std::runtime_error("inline value requires its exact type key");
             for (const auto& [name, child] : value.begin().value().items()) {
-                const auto* field = context.GetFieldLayout(type, name.c_str());
-                if (!field || uint64_t(field->valueOffset) + (field->valueSize ? field->valueSize : sizeof(void*)) > valueSize)
+                const auto field = ci::API::TypeDefinition{&context, type}.find_field(name.c_str());
+                if (!field || field.is_static())
                     throw std::runtime_error("inline field exceeds value layout: " + name);
-                ValidateJsonValue(context, field->type, field->valueSize, child, elementIndex);
+                const auto fieldType = field.get_type();
+                const auto fieldSize = fieldType.get_valuetype_size();
+                if (uint64_t(field.get_offset_from_fieldptr()) + (fieldSize ? fieldSize : sizeof(void*)) > valueSize)
+                    throw std::runtime_error("inline field exceeds value layout: " + name);
+                ValidateJsonValue(context, fieldType.handle, fieldSize, child, elementIndex);
             }
         } else {
             // 绑定期只验证标量，暂存空间按 v1 最大标量 Guid 的大小分配，不创建托管对象。
@@ -432,7 +430,7 @@ void ValidateJsonValue(const ci::ProviderContext& context, const ci::Type* type,
         }
         return;
     }
-    if (type->objectType == std::to_underlying(via::clr::VMObjType::ValType))
+    if (context.type_definition->is_valuetype(type))
         throw std::runtime_error("value type has a reference layout");
     if (value.is_null())
         return;
@@ -441,8 +439,8 @@ void ValidateJsonValue(const ci::ProviderContext& context, const ci::Type* type,
             throw std::runtime_error("System.String requires a JSON string");
         return;
     }
-    if (context.IsDerivedFrom(type, resourceHolderType)) {
-        if (!context.CreateResourceHolder || !value.is_string() || value.get_ref<const std::string&>().empty() || value.get_ref<const std::string&>().contains('\0'))
+    if (context.type_definition->is_derived_from(type, resourceHolderType)) {
+        if (!context.resource_manager->create_resource_holder || !value.is_string() || value.get_ref<const std::string&>().empty() || value.get_ref<const std::string&>().contains('\0'))
             throw std::runtime_error("ResourceHolder requires a valid path and CI factory");
         return;
     }
@@ -459,26 +457,26 @@ void ValidateJsonValue(const ci::ProviderContext& context, const ci::Type* type,
     }
     if (!value.is_object() || value.size() != 1 || !value.begin().value().is_object())
         throw std::runtime_error("reference requires one type key and field dictionary");
-    const auto* actualType = context.GetType(value.begin().key().c_str());
-    if (!context.IsDerivedFrom(actualType, type) || actualType->objectType == std::to_underlying(via::clr::VMObjType::Array) || actualType->objectType == std::to_underlying(via::clr::VMObjType::ValType))
+    const auto* actualType = context.tdb->find_type(value.begin().key().c_str());
+    if (!context.type_definition->is_derived_from(actualType, type) || context.type_definition->is_array(actualType) || context.type_definition->is_valuetype(actualType))
         throw std::runtime_error("reference type mismatch: " + value.begin().key());
     const auto& fields = value.begin().value();
     if (fields.contains("$uri")) {
-        if (fields.size() != 1 || !fields.at("$uri").is_string() || fields.at("$uri").get_ref<const std::string&>().empty() || fields.at("$uri").get_ref<const std::string&>().contains('\0') || !context.IsDerivedFrom(actualType, userDataType) || !context.CreateUserData)
+        if (fields.size() != 1 || !fields.at("$uri").is_string() || fields.at("$uri").get_ref<const std::string&>().empty() || fields.at("$uri").get_ref<const std::string&>().contains('\0') || !context.type_definition->is_derived_from(actualType, userDataType) || !context.resource_manager->create_userdata)
             throw std::runtime_error("invalid external USER declaration");
         return;
     }
     if (actualType == prefabType) {
-        static const auto set_Standby = context.GetMethod(prefabType, "set_Standby(System.Boolean)");
+        static const auto set_Standby = ci::API::TypeDefinition{&context, prefabType}.find_method("set_Standby(System.Boolean)").get_function();
         if (fields.size() != 2 || !fields.contains("Standby") || !fields.at("Standby").is_boolean() || !fields.contains("Path") || !fields.at("Path").is_string() || !set_Standby)
             throw std::runtime_error("Prefab requires Standby, Path and native setter");
         return;
     }
     for (const auto& [name, child] : fields.items()) {
-        const auto* field = context.GetFieldLayout(actualType, name.c_str());
-        if (!field || name.starts_with('$'))
+        const auto field = ci::API::TypeDefinition{&context, actualType}.find_field(name.c_str());
+        if (!field || field.is_static() || name.starts_with('$'))
             throw std::runtime_error("instance field missing: " + name);
-        ValidateJsonValue(context, field->type, field->valueSize, child, elementIndex);
+        ValidateJsonValue(context, field.get_type().handle, field.get_type().get_valuetype_size(), child, elementIndex);
     }
 }
 } // namespace UserDataExtension

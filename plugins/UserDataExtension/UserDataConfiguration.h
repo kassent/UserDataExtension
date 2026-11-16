@@ -10,7 +10,7 @@
 namespace UserDataExtension {
 using Json = nlohmann::json;
 
-enum class OperationKind {
+enum class FieldEditKind {
     Append,
     Set,
     Add,
@@ -21,35 +21,33 @@ enum class OperationKind {
     Maximum,
 };
 // 将 v1 操作名解析为枚举；未知名字抛异常。
-OperationKind ParseOperationKind(std::string_view name);
+FieldEditKind ParseFieldEditKind(std::string_view name);
 // 返回有效操作枚举对应的固定日志名称。
-const char* GetOperationName(OperationKind kind);
+const char* GetFieldEditName(FieldEditKind kind);
 
-// 已解析的操作声明；路径步骤在登记时缓存，实际字段地址在每次 USER 解码后重新定位。
-struct Operation {
-    OperationKind kind{};
-    Json items;
-    Json value;
-    std::string key;
-    std::vector<FieldPathStep> keySteps;
-};
-
-struct FieldOperation {
+// 一条字段修改声明；只保存路径语法与参数，实际字段地址在每次 USER 解码后定位。
+struct FieldEdit {
     std::string fieldPath;
-    Operation operation;
-    std::vector<FieldPathStep> pathSteps;
+    std::vector<FieldPathStep> fieldPathSteps;
+    FieldEditKind kind{};
+    Json value;
+    Json items;
+    // append 的去重身份：元素字段路径或特殊标识 $uri。
+    std::string identityKey;
+    std::vector<FieldPathStep> identityKeySteps;
 };
 
-// 一个同根、字段间独立的批次；rootType 由 CI-ready 绑定，fields 顺序不是依赖执行机制。
-struct Patch {
-    std::string typeName;
-    const ci::Type* rootType{};
-    std::vector<FieldOperation> fields;
+// 匹配一种 USER 根类型的一批独立字段修改；整批准备成功后再提交。
+struct TypePatch {
+    std::string rootTypeName;
+    ci::TypeDefinitionHandle rootType{};
+    std::vector<FieldEdit> fieldEdits;
 };
 
-struct Extension {
-    std::string target;
-    std::vector<Patch> patches;
+// 一个 USER 资源 URI 对应的修改声明；类型批次按声明顺序执行。
+struct ResourcePatch {
+    std::string resourceUri;
+    std::vector<TypePatch> typePatches;
 };
 
 // 已解析的配置快照。文件保留词法规范化的输入 path，不解析虚拟映射背后的物理位置。
@@ -58,9 +56,9 @@ struct Extension {
 struct ConfigurationDeclaration {
     std::filesystem::path path;
     std::string sourceId;
-    bool fromApi{};
+    bool fromAPI{};
     bool fromDirectory{};
-    std::vector<Extension> extensions;
+    std::vector<ResourcePatch> resourcePatches;
 };
 
 // 按目录段再按文件名做稳定序数比较，不使用区域设置或自然数字排序。

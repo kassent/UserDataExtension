@@ -2,22 +2,23 @@
 #include <FileUtils.h>
 #include <LogUtils.h>
 #include <Windows.h>
+#include <ci/Provider.hpp>
 #include <exception>
 #include <reframework/API.hpp>
 #include <utility>
 
 // 向 CI 提供零类型 provider 的登记桥接；本插件不注册托管类型或方法。
 CI_REGISTER_PROVIDER(registration) {
-    // 配置由 ci_on_tdb_ready 统一收集；此处不访问 VM 或 RF SDK。
+    // 配置由 ci_on_post_initialize 统一收集；此处不访问 VM 或 RF SDK。
 }
 
 // 在全局 cctor 前关闭配置登记、收集固定目录并安装 USER 解码完成 hook。
 // 此阶段只借用 CI Context，不依赖 RF SDK；失败记录日志，不让异常越过 DLL 回调边界。
-extern "C" __declspec(dllexport) void ci_on_tdb_ready(const ci::ProviderContext* context) noexcept {
+extern "C" __declspec(dllexport) void ci_on_post_initialize(const ci::ProviderContext* context) noexcept {
     try {
         const auto gameRoot = FileUtils::GetExecutableDirectory();
         auto declarations = UserDataExtension::GetConfigurationRegistry().FinalizeRegistration(gameRoot);
-        if (!UserDataExtension::InstallLoadingHook(context, std::move(declarations))) {
+        if (!UserDataExtension::InstallLoadingHook(context->sdk, std::move(declarations))) {
             _MESSAGE("[UserDataExtension] Failed to install USER loading hook");
             return;
         }

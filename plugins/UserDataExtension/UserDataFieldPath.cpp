@@ -96,54 +96,55 @@ std::vector<FieldPathStep> ParseFieldPath(std::string_view path) {
     return steps;
 }
 
-// 沿声明类型推导路径末端布局，并验证集合选择器、匹配 key 及预期值的类型。
-// 引用集合中的实际元素可为派生类：只有这种缺字段情况允许返回空布局，延后到现场检查。
+// 沿声明类型推导路径末端类型，并验证集合选择器、匹配 key 及预期值的类型。
+// 引用集合中的实际元素可为派生类：只有这种缺字段情况允许返回 nullptr，延后到现场检查。
 // 值类型和已明确的类型错误仍立即拒绝，不把类型未知当作字段一定存在。
-static ci::FieldLayout ValidatePathLayout(const ci::ProviderContext& context, const ci::Type* rootType, std::span<const FieldPathStep> steps, bool runtimeElementType) {
-    static const auto* userDataType = context.GetType("via.UserData");
-    static const auto* stringType = context.GetType("System.String");
-    ci::FieldLayout location{.type = rootType};
+static ci::TypeDefinitionHandle ValidatePathType(const ci::SDKAPI& context, ci::TypeDefinitionHandle type, std::span<const FieldPathStep> steps, bool runtimeElementType) {
+    static const auto* userDataType = context.tdb->find_type("via.UserData");
+    static const auto* stringType = context.tdb->find_type("System.String");
     for (const auto& step : steps) {
         if (step.kind == FieldPathStepKind::Field) {
-            const auto* field = context.GetFieldLayout(location.type, step.fieldName.c_str());
+            const auto field = ci::API::TypeDefinition{&context, type}.find_field(step.fieldName.c_str());
             // 引用集合可以声明基类、保存派生行。缺成员时只延迟布局检查，运行期仍须精确定位。
-            if (!field && runtimeElementType)
-                return {};
-            if (!field)
+            if ((!field || field.is_static()) && runtimeElementType)
+                return nullptr;
+            if (!field || field.is_static())
                 throw std::runtime_error("instance field missing: " + step.fieldName);
-            location = *field;
-            if (field->valueSize)
+            type = field.get_type().handle;
+            if (field.get_type().get_valuetype_size())
                 runtimeElementType = false;
         } else {
-            const auto* elementType = GetCollectionLayout(context, location.type).elementType;
-            location = {.type = elementType, .valueSize = elementType->objectType == std::to_underlying(via::clr::VMObjType::ValType) ? GetSupportedValueSize(context, elementType) : 0};
-            runtimeElementType = !location.valueSize;
+            const auto layout = GetCollectionLayout(context, type);
+            const auto* elementType = layout.elementType;
+            type = elementType;
+            runtimeElementType = !layout.valueSize;
             if (step.kind == FieldPathStepKind::Match) {
                 if (step.key == "$uri") {
-                    if (!context.IsDerivedFrom(elementType, userDataType) || !step.value.is_string())
+                    if (!context.type_definition->is_derived_from(elementType, userDataType) || !step.value.is_string())
                         throw std::runtime_error("$uri selector requires USER elements and a string");
                     NormalizeUserDataUri(step.value.get<std::string>());
                     continue;
                 }
-                if (location.valueSize)
+                if (layout.valueSize)
                     throw std::runtime_error("field matcher requires reference elements");
-                const auto identity = ValidatePathLayout(context, elementType, step.keySteps, true);
-                if (!identity.type)
+                const auto identity = ValidatePathType(context, elementType, step.keySteps, true);
+                if (!identity)
                     continue;
-                if ((!identity.valueSize && identity.type != stringType) || identity.valueSize > sizeof(RE::SystemGuid))
+                const auto identitySize = context.type_definition->get_valuetype_size(identity);
+                if ((!identitySize && identity != stringType) || identitySize > sizeof(RE::SystemGuid))
                     throw std::runtime_error("selector identity must be scalar, Guid or string");
-                if (identity.valueSize && GetScalarSize(context, identity.type) != identity.valueSize)
+                if (identitySize && GetScalarSize(context, identity) != identitySize)
                     throw std::runtime_error("selector identity layout is not a supported scalar");
-                ValidateJsonValue(context, identity.type, identity.valueSize, step.value);
+                ValidateJsonValue(context, identity, identitySize, step.value);
             }
         }
     }
-    return location;
+    return type;
 }
 
-// 从声明根类型校验完整路径，返回已知末端布局；type=null 表示依赖运行时派生行。
-ci::FieldLayout ValidateFieldPath(const ci::ProviderContext& context, const ci::Type* rootType, std::span<const FieldPathStep> steps) {
-    return ValidatePathLayout(context, rootType, steps, false);
+// 从声明根类型校验完整路径，返回已知末端类型；nullptr 表示依赖运行时派生行。
+ci::TypeDefinitionHandle ValidateFieldPath(const ci::SDKAPI& context, ci::TypeDefinitionHandle rootType, std::span<const FieldPathStep> steps) {
+    return ValidatePathType(context, rootType, steps, false);
 }
 
 // 阻止解引用空父对象或本轮尚未解码的外部 USER 请求。
@@ -157,10 +158,10 @@ static void CheckDecodedObject(void* object, std::span<void* const> externalObje
 
 // 按真实字段类型转换选择器值，再与当前字段比较：字符串比内容，整数/Guid 比 payload。
 // 浮点按数值精确相等匹配并拒绝非有限当前值，因而 +0 与 -0 可命中同一行。
-static bool MatchesSelector(const ci::ProviderContext& context, void* vmContext, const FieldLocation& location, const Json& expected) {
-    static const auto* stringType = context.GetType("System.String");
-    static const auto* singleType = context.GetType("System.Single");
-    static const auto* doubleType = context.GetType("System.Double");
+static bool MatchesSelector(const ci::SDKAPI& context, void* vmContext, const FieldLocation& location, const Json& expected) {
+    static const auto* stringType = context.tdb->find_type("System.String");
+    static const auto* singleType = context.tdb->find_type("System.Single");
+    static const auto* doubleType = context.tdb->find_type("System.Double");
     if (location.type == stringType) {
         const auto* string = *static_cast<RE::SystemString**>(location.address);
         return expected.is_string() && string && string->to_str() == expected.get<std::string>();
@@ -188,22 +189,22 @@ static bool MatchesSelector(const ci::ProviderContext& context, void* vmContext,
 // 在已解码对象图上定位实际字段槽，返回借用地址、类型、大小及引用写屏障所需的 owner。
 // 逐步处理字段、数组/List 下标和唯一匹配选择器；每次跨引用都检查外部 USER 解码边界。
 // 内嵌值使用 payload 相对偏移，引用对象使用实际实例布局；记录祖先引用槽供同批冲突检查。
-FieldLocation ResolveFieldPath(const ci::ProviderContext& context, void* vmContext, void* root, std::span<const FieldPathStep> steps, std::span<void* const> externalObjects) {
+FieldLocation ResolveFieldPath(const ci::SDKAPI& context, void* vmContext, void* root, std::span<const FieldPathStep> steps, std::span<void* const> externalObjects) {
     CheckDecodedObject(root, externalObjects);
     auto* object = root;
-    const auto* type = context.GetInstanceType(root);
+    const auto* type = context.managed_object->get_type_definition(root);
     bool inlineValue = false;
     FieldLocation result{.owner = root};
     // address 跟随路径前进；owner 只在跨托管引用/进入数组元素区时变化。
     for (size_t i = 0; i < steps.size(); ++i) {
         const auto& step = steps[i];
         if (step.kind == FieldPathStepKind::Field) {
-            const auto* field = context.GetFieldLayout(type, step.fieldName.c_str());
-            if (!field)
+            const auto field = ci::API::TypeDefinition{&context, type}.find_field(step.fieldName.c_str());
+            if (!field || field.is_static())
                 throw std::runtime_error("instance field missing: " + step.fieldName);
-            result.address = inlineValue ? static_cast<uint8_t*>(object) + field->valueOffset : context.GetField(object, field);
-            result.type = field->type;
-            result.valueSize = field->valueSize;
+            result.address = field.get_data_raw(object, inlineValue);
+            result.type = field.get_type().handle;
+            result.valueSize = field.get_type().get_valuetype_size();
             if (!result.address)
                 throw std::runtime_error("instance field address is missing: " + step.fieldName);
         } else {
@@ -212,11 +213,11 @@ FieldLocation ResolveFieldPath(const ci::ProviderContext& context, void* vmConte
             auto* collection = *static_cast<void**>(result.address);
             CheckDecodedObject(collection, externalObjects);
             result.ancestorReferenceSlots.push_back(result.address);
-            const auto* collectionType = context.GetInstanceType(collection);
+            const auto* collectionType = context.managed_object->get_type_definition(collection);
             const auto layout = GetCollectionLayout(context, collectionType);
             const auto view = ReadCollection(context, collectionType, collection);
             if (layout.itemsField)
-                result.ancestorReferenceSlots.push_back(context.GetField(collection, layout.itemsField));
+                result.ancestorReferenceSlots.push_back(layout.itemsField.get_data_raw(collection));
             auto* array = view.items;
             const auto* elementType = view.elementType;
             const auto count = view.count;
@@ -226,12 +227,12 @@ FieldLocation ResolveFieldPath(const ci::ProviderContext& context, void* vmConte
             if (step.kind == FieldPathStepKind::Match) {
                 if (valueSize)
                     throw std::runtime_error("field matcher requires reference elements");
-                using Fnget_URI = RE::SystemString* (*)(void*, void*);
-                static const auto* userDataType = context.GetType("via.UserData");
-                static const auto get_URI = reinterpret_cast<Fnget_URI>(context.GetMethod(userDataType, "get_URI()"));
+                using Fnget_URI = RE::SystemString* (*)(void* vmContext, void* userData);
+                static const auto* userDataType = context.tdb->find_type("via.UserData");
+                static const auto get_URI = ci::API::TypeDefinition{&context, userDataType}.find_method("get_URI()").get_function<Fnget_URI>();
                 std::string expectedUri;
                 if (step.key == "$uri") {
-                    if (!get_URI || !context.IsDerivedFrom(elementType, userDataType) || !step.value.is_string())
+                    if (!get_URI || !context.type_definition->is_derived_from(elementType, userDataType) || !step.value.is_string())
                         throw std::runtime_error("$uri selector requires USER elements and get_URI");
                     expectedUri = NormalizeUserDataUri(step.value.get<std::string>());
                 }
@@ -274,7 +275,7 @@ FieldLocation ResolveFieldPath(const ci::ProviderContext& context, void* vmConte
             result.ancestorReferenceSlots.push_back(result.address);
             CheckDecodedObject(object, externalObjects);
             result.owner = object;
-            type = context.GetInstanceType(object);
+            type = context.managed_object->get_type_definition(object);
         } else {
             type = result.type;
         }

@@ -111,7 +111,7 @@ JSON makes editing more convenient, but authors still need to understand field s
 
 For private configuration wholly owned by a mod, a separate USER is often clearer. Reuse existing shared entries first; use UDE when adding entries or making targeted changes is necessary. UDE does not replace new models, textures, motions, component implementations, or game-system registration.
 
-ClassInjector defines new managed types; UDE constructs data for available types and modifies existing USERs. See the [ClassInjector Developer Guide](https://github.com/kassent/REClassInjector).
+ClassInjector defines new managed types; UDE constructs data for available types and modifies existing USERs. See the [ClassInjector Developer Guide](https://github.com/kassent/REClassInjector/blob/main/README.md).
 
 ## 3. Installation and File Layout
 
@@ -160,7 +160,7 @@ Search for `_GestureWaterGunMaxAmmo` and `_GestureWaterGun_Range`, compare the o
 
 A whole-file replacement distributes the entire `PlayerGlobalParam.user.3`. With UDE, declare only these two field changes and retain the other parameters from the current native resource.
 
-Save the configuration below as `reframework/data/UserDataExtension/20_WaterGunGesture/10_water_gun.json`:
+Save as `reframework/data/UserDataExtension/20_WaterGunGesture/10_water_gun.json`, or use the included [Water Gun example JSON](plugins/UserDataExtension/examples/water-gun.json):
 
 ```json
 {
@@ -598,21 +598,131 @@ Review the generated JSON, install the contents of `MyMod/reframework/` preservi
 
 ## 10. Plugin Developer API
 
-Ordinary JSON mods can use automatic loading. C++ plugins that generate configuration dynamically at startup can use two entries provided by `UserDataExtension.h`:
+### 10.1 Registration Contract
+
+Ordinary JSON mods use automatic loading. C++ plugins generating startup configuration use the two C exports in [UserDataExtension.h](plugins/UserDataExtension/UserDataExtension.h), both returning `bool`, using `__cdecl`, and declared `noexcept`:
 
 | API | Input | Purpose |
 |---|---|---|
 | `RegisterUserDataExtension(const char* jsonPathUtf8)` | Absolute UTF-8 path to a configuration file | Register files outside the automatic directory or managed by a plugin |
-| `RegisterUserDataExtensionJson(const char* sourceIdUtf8, const char* jsonUtf8)` | Source ID and NUL-terminated UTF-8 JSON text | Register generated configuration without an intermediate file |
+| `RegisterUserDataExtensionJson(const char* sourceIdUtf8, const char* jsonUtf8)` | Source ID and NUL-terminated UTF-8 JSON text | Submit generated configuration without an intermediate file |
 
-- Call synchronously during the caller's CI function-registration stage and declare a module dependency on UDE so that the service loads first.
-- Registration closes when UDE begins handling its TDB-ready notification. Do not wait for ordinary RF plugin initialization or an in-game callback.
-- `true` means parsing and registration succeeded. Application occurs later when the target resource loads.
-- Inputs are copied synchronously as needed. The caller may release the input strings after return.
-- A normalized absolute file path retains its first successful registration. An in-memory source ID also retains its first successful snapshot; IDs are case-sensitive.
-- In-memory sources sort case-sensitively by ID and execute before file sources. API-registered files and automatically discovered files share path-based ordering; call timing does not grant priority.
+- Prefer **synchronous submission from `ci_on_initialize`**. CI types can be queried, and all first-round callbacks finish before UDE's second-round callback.
+- Pure file declarations that need no TDB queries can also be submitted during `CI_REGISTER_PROVIDER`. That stage must not access the VM/RF SDK; it is not the only registration opportunity.
+- UDE closes the API window in `FinalizeRegistration` during `ci_on_post_initialize`, then scans directories, combines and sorts sources, binds types, and installs the hook. Do not submit from your own post callback, asynchronous tasks, ordinary RF initialization, or in-game callbacks.
+- `true` means **syntax parsing and registration succeeded**, not successful type binding, resource loading, or application. Binding failures log `rejected source=`. Calls after the window closes return `false`.
+- Inputs are saved as snapshots; release input strings after return. A normalized absolute path keeps its first successful content. In-memory IDs are case-sensitive and keep their first successful snapshot; failed registrations do not claim the ID.
+- In-memory sources sort case-sensitively by ID before file sources. API files and scanned files share path-based ordering. Registration call order does not set override priority.
 
-Use matching release interfaces for the caller, UDE, and ClassInjector. For configuration-only mods, distributing JSON without a dedicated DLL is usually simpler.
+### 10.2 From CI Startup to Native USER Consumption
+
+```text
+CI collects provider function/enum registrations and type declarations
+  → Prepare TDB, native entries, and custom vtables
+  → Every provider's ci_on_initialize
+       Callers submit UDE JSON (CI metadata queries are available)
+  → Every provider's ci_on_post_initialize
+       UDE: FinalizeRegistration → validate declarations → InstallLoadingHook
+  → The game continues static construction and normal resource loading
+  → A USER's internal object graph actually finishes decoding
+       Match resource URI + exact root type → prepare and commit field edits
+  → Native onLoad builds runtime caches from the modified data
+```
+
+Per-provider order within a round is not an inter-plugin protocol. The **boundary between rounds** guarantees first-round submission before UDE closes registration. UDE itself exports only the post notification; an empty first notification is unnecessary. Registration neither loads all targets proactively nor replays `onLoad` or directly fills native caches.
+
+### 10.3 Compilable C++ Submission Example
+
+This zero-type provider submits Section 4's Water Gun configuration. Compile as C++20 for Windows x64, adding `plugins/ClassInjector/include` and `plugins/UserDataExtension` to include paths. Install `ExamplePlugin.dll` with an empty same-directory `ExamplePlugin.toml`, plus matching UDE DLL/TOML files. No RF SDK or UDE import library is required.
+
+UDE and its caller may belong to different MO2 mods or physical directories. Explicitly load the **game-visible absolute path** and resolve the public export. Do not search only beside the caller's physical DLL, change global DLL search paths, or depend on manifest filenames. This follows the loading approach already used by [EnemyRegistry](https://github.com/kassent/EnemyRegistry/blob/main/plugins/EnemyRegistry/Plugin.cpp).
+
+```cpp
+#include <Windows.h>
+#include <ci/Provider.hpp>
+#include <UserDataExtension.h>
+#include <cstdio>
+#include <exception>
+#include <filesystem>
+#include <iterator>
+
+CI_REGISTER_PROVIDER(registration) {
+    // Zero-type provider: no VM or RF SDK access here.
+}
+
+extern "C" __declspec(dllexport)
+void ci_on_initialize(const ci::ProviderContext* context) noexcept {
+    (void)context;
+    try {
+        wchar_t executablePath[32768]{};
+        const auto length = GetModuleFileNameW(
+            nullptr, executablePath, static_cast<DWORD>(std::size(executablePath)));
+        if (!length || length >= std::size(executablePath)) {
+            std::fputs("ExamplePlugin: game executable path unavailable\n", stderr);
+            return;
+        }
+        const auto modulePath = std::filesystem::path(executablePath).parent_path()
+            / L"reframework" / L"plugins" / L"UserDataExtension.dll";
+        const auto module = LoadLibraryExW(modulePath.c_str(), nullptr,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+        if (!module) {
+            std::fprintf(stderr, "ExamplePlugin: UDE load failed (%lu)\n", GetLastError());
+            return;
+        }
+        // Retain this loader reference for the process lifetime.
+        using FnRegisterJson = decltype(&RegisterUserDataExtensionJson);
+        const auto registerJson = reinterpret_cast<FnRegisterJson>(
+            GetProcAddress(module, "RegisterUserDataExtensionJson"));
+        if (!registerJson) {
+            std::fputs("ExamplePlugin: UDE JSON export missing\n", stderr);
+            return;
+        }
+        const char* declaration = R"json({
+            "format": "UserDataExtension/v1",
+            "extensions": [{
+                "target": "GameDesign/Player/ActionData/Common/GlobalParam/PlayerGlobalParam.user",
+                "patches": [{
+                    "app.user_data.PlayerGlobalParam": {
+                        "_GestureWaterGunMaxAmmo": {"op": "set", "value": 255},
+                        "_GestureWaterGun_Range": {"op": "set", "value": 80.0}
+                    }
+                }]
+            }]
+        })json";
+        if (!registerJson("ExamplePlugin/WaterGun", declaration)) {
+            std::fputs("ExamplePlugin: UDE declaration rejected; check UDE log\n", stderr);
+            return;
+        }
+        std::fputs("ExamplePlugin: UDE declaration registered\n", stderr);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "ExamplePlugin: startup failed: %s\n", error.what());
+    } catch (...) {
+        std::fputs("ExamplePlugin: startup failed\n", stderr);
+    }
+}
+```
+
+`GetModuleFileNameW(nullptr, ...)` locates the game EXE, not the provider DLL. MO2 resolves the relative installation through the game view. Keep the loader reference for the process lifetime; do not unload UDE after the callback. `decltype` uses the public header's exact export signature without directly calling the imported symbol, so it adds no static UDE PE import. Replace stderr output with your project's logger as appropriate.
+
+JSON-only mods do not need this DLL. Do not also install the same example JSON and register it twice. Generators can supply their own JSON text through the same API with an extension-specific, stable source ID.
+
+### 10.4 Internal Declarations and JSON Compatibility
+
+For UDE implementation and test contributors, the current internal model is:
+
+```text
+ConfigurationDeclaration.resourcePatches
+  → ResourcePatch { resourceUri, typePatches }
+    → TypePatch { rootTypeName, rootType, fieldEdits }
+      → FieldEdit { fieldPath, fieldPathSteps, kind, value, items,
+                    identityKey, identityKeySteps }
+```
+
+JSON v1 keys **do not change**: `extensions/target` map to resource declarations, `patches` to type batches, and each field's `op/value/items/key` to a flat `FieldEdit`. `identityKey` identifies appended elements for deduplication, not the target field path. There is no extra `Operation` wrapper or old-type alias.
+
+Path steps store syntax during parsing. `ValidateTypePatch` validates metadata, while actual field addresses are resolved against each decoded object's concrete type. `PatchExecutor::ApplyTypePatch` locates and prepares a batch before committing it; the rename preserves failure and reference-ownership behavior and adds no global field-layout cache.
+
+Implementation entries: [Plugin.cpp](plugins/UserDataExtension/Plugin.cpp), [configuration/registration](plugins/UserDataExtension/UserDataConfiguration.cpp), [native decode dispatch](plugins/UserDataExtension/UserDataLoading.cpp), and [batch executor](plugins/UserDataExtension/UserDataPatchExecutor.cpp). Use matching CI **SDK ABI3**; update all providers in an instance together with its host, not UDE alone. See the [CI guide](https://github.com/kassent/REClassInjector/blob/main/README.md#10-initialization-and-the-provider-sdk-api) for ABI and ownership contracts.
 
 ## 11. Troubleshooting, Updates, and Distribution
 
@@ -628,6 +738,7 @@ Use matching release interfaces for the caller, UDE, and ClassInjector. For conf
 | Log fragment | Meaning |
 |---|---|
 | `Registered` | A configuration source has been collected |
+| `configuration registration window has closed` | Submission was too late; submit synchronously in the caller's `ci_on_initialize` |
 | `Order=` | Final source execution order |
 | `rejected source=` | Type/operation validation failed; inspect the reason |
 | `Applied` | A field operation executed; appends report added/skipped counts |

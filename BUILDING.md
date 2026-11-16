@@ -27,7 +27,7 @@ git submodule update --init --recursive
 ```powershell
 cmake -S . -B build -A x64 `
   "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-  -DVCPKG_UserDataExtension_TRIPLET=x64-windows-static
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static
 cmake --build build --config Release --target UserDataExtension
 cmake --build build --config Release --target check
 ```
@@ -41,14 +41,14 @@ cmake --build build --config Release --target check
 ```text
 common/                         WildsCommonLib submodule
 plugins/UserDataExtension/       plugin, public API, examples and portable tests
-plugins/ClassInjector/include/   matching ClassProvider.h SDK header only
+plugins/ClassInjector/include/ci/ matching Provider/API SDK headers only
 ```
 
-Build output includes `UserDataExtension.dll` and its matching `UserDataExtension.toml`. Runtime use also requires the matching ClassInjector host; this repository embeds only its SDK header, not a second CI core.
+Build output includes `UserDataExtension.dll` and its matching `UserDataExtension.toml`. Runtime use also requires the matching ClassInjector host; this repository embeds only its four public SDK headers (`ci/Provider.h`, `ci/Provider.hpp`, `ci/API.h`, `ci/API.hpp`), not a second CI core. The SDK ABI is 3; replace the host and all providers together when migrating from ABI1/2.
 
 The included offline tests cover declaration registration and common contracts. `UserDataOperationTests.cpp` is an internal cross-plugin integration fixture tied to EnemyRegistry and an external game TDB snapshot, not production code; that fixture and its CMake target are intentionally excluded rather than copying unrelated monster plugins or publishing a game dump. The original workspace test is unchanged.
 
-这里包含全部 UDE 生产代码、公开头、JSON 示例与独立登记测试。依赖原工作区 EnemyRegistry 和真实游戏 TDB 快照的跨插件集成测试不随包发布；这不表示已有的快照测试或实机测试被本仓库离线测试替代。
+这里包含全部 UDE 生产代码、公开头、JSON 示例与独立登记测试。声明模型使用 ResourcePatch/TypePatch/FieldEdit，JSON v1 控制键不变；提交窗口与完整 C++ 示例见中英文 README 第 10 节。依赖原工作区 EnemyRegistry 和真实游戏 TDB 快照的跨插件集成测试不随包发布；这不表示已有的快照测试或实机测试被本仓库离线测试替代。
 
 ## Source synchronization / 源码同步
 

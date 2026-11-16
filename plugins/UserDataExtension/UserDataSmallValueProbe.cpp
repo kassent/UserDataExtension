@@ -1,11 +1,12 @@
 #include "UserDataSmallValueChecks.h"
 #include <GameTypes.h>
+#include <ci/Provider.hpp>
 #include <lua.hpp>
 #include <sol/sol.hpp>
 
 // 显式构建、手动部署的有限实机探针；不随生产 DLL 部署，不安装常驻业务 hook。
 namespace UserDataSmallValueProbe {
-static const ci::ProviderContext* context{};
+static const ci::SDKAPI* context{};
 static void* requestedUserData{}; // CreateUserData 交出的一份 owned 引用，release_request 归还。
 
 // 仅接受从真实原生调用传入的 ctx；取得线程 ctx 本身不代表已经建立托管作用域。
@@ -32,7 +33,7 @@ static void InitializeLua(lua_State* state) {
         CheckContext(address);
         if (requestedUserData)
             throw std::runtime_error("request already held");
-        requestedUserData = context->CreateUserData(context->GetType("app.user_data.AttackAreaParam"), "GameDesign/Enemy/Em0001/00/Data/Em0001_00_Param_AttackAreaParam.user");
+        requestedUserData = context->resource_manager->create_userdata(context->tdb->find_type("app.user_data.AttackAreaParam"), "GameDesign/Enemy/Em0001/00/Data/Em0001_00_Param_AttackAreaParam.user");
         if (!requestedUserData)
             throw std::runtime_error("native USER request failed");
         return uintptr_t(requestedUserData);
@@ -46,15 +47,15 @@ static void InitializeLua(lua_State* state) {
         // RootMove 的公开 getter 是实际原生消费者，不只读取 USER 源字段。
         const auto move = UserDataExtension::ResolveFieldPath(*context, vmctx, requestedUserData, UserDataExtension::ParseFieldPath(prefix + "_RootMove"));
         auto* object = *static_cast<void**>(move.address);
-        using Fnget_PosList = void* (*)(void*, void*);
-        const auto get_PosList = reinterpret_cast<Fnget_PosList>(context->GetMethod(context->GetType("app.RootMoveData"), "get_PosList()"));
+        using Fnget_PosList = void* (*)(void* vmContext, void* rootMove);
+        const auto get_PosList = ci::API{*context}.tdb().find_type("app.RootMoveData").find_method("get_PosList()").get_function<Fnget_PosList>();
         const bool consumerMatches = get_PosList && get_PosList(vmctx, object) == list.list;
         return Json{{"count", list.count}, {"stride", list.stride}, {"first_x", Read<float>(*context, vmctx, requestedUserData, prefix + "_RootMove._PosList[0].x")}, {"last_z", Read<float>(*context, vmctx, requestedUserData, prefix + "_RootMove._PosList[2].z")}, {"offset_y", Read<float>(*context, vmctx, requestedUserData, prefix + "_DataList[0].OffsetLen.y")}, {"shell", Read<int32_t>(*context, vmctx, requestedUserData, prefix + "_DataList[0].ShellIndex._Value")}, {"consumer_matches", consumerMatches}}.dump();
     };
     api["release_request"] = [](uintptr_t address) {
         CheckContext(address);
         if (requestedUserData) {
-            context->Release(requestedUserData);
+            context->managed_object->release(requestedUserData);
             requestedUserData = nullptr;
         }
     };
@@ -64,8 +65,8 @@ static void InitializeLua(lua_State* state) {
 CI_REGISTER_PROVIDER(registration) {}
 
 // CI-ready 只缓存进程期服务表，不调用 VM 或请求资源。
-extern "C" __declspec(dllexport) void ci_on_tdb_ready(const ci::ProviderContext* context) noexcept {
-    UserDataSmallValueProbe::context = context;
+extern "C" __declspec(dllexport) void ci_on_initialize(const ci::ProviderContext* context) noexcept {
+    UserDataSmallValueProbe::context = context->sdk;
 }
 
 // 仅向 RF Lua 注册有限测试入口，不安装生产调度或修改运行态。

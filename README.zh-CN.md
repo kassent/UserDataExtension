@@ -159,7 +159,7 @@ JSON 让编辑更方便，但仍需理解字段含义。UDE 校验类型和可�
 
 完整 USER 替换会交付整个 `PlayerGlobalParam.user.3`。使用 UDE 时，只需声明这两个字段的改值，保留当前原版资源中的其他参数。
 
-将下面的配置保存为 `reframework/data/UserDataExtension/20_WaterGunGesture/10_water_gun.json`：
+保存为 `reframework/data/UserDataExtension/20_WaterGunGesture/10_water_gun.json`，也可使用随文提供的 [水枪示例 JSON](plugins/UserDataExtension/examples/water-gun.json)：
 
 ```json
 {
@@ -594,21 +594,131 @@ python generate_ude.py
 
 ## 10. 插件开发者接口
 
-普通 JSON Mod 使用自动加载即可。需要在启动时动态生成配置的 C++ 插件，可以使用 `UserDataExtension.h` 提供的两个入口：
+### 10.1 登记契约
+
+普通 JSON Mod 使用自动加载即可；需要在启动时生成配置的 C++ 插件使用 [UserDataExtension.h](plugins/UserDataExtension/UserDataExtension.h) 中的两个 C 导出，均返回 `bool`、采用 `__cdecl` 并声明 `noexcept`：
 
 | 接口 | 输入 | 用途 |
 |---|---|---|
 | `RegisterUserDataExtension(const char* jsonPathUtf8)` | 配置文件的 UTF-8 绝对路径 | 登记固定目录之外或由插件管理的文件 |
 | `RegisterUserDataExtensionJson(const char* sourceIdUtf8, const char* jsonUtf8)` | 来源 ID 与 NUL 结尾的 UTF-8 JSON 文本 | 直接登记生成的配置，无需中间文件 |
 
-- 在调用方的 CI 函数登记阶段同步调用，并声明对 UDE 的模块依赖，确保服务先装载。
-- 登记窗口在 UDE 开始处理 TDB-ready 通知时关闭；不等待普通 RF 插件初始化或运行中回调再登记。
-- 返回 `true` 表示配置解析和登记成功，目标资源稍后加载时才应用。
-- 接口同步复制所需内容，返回后调用方可以释放输入字符串。
-- 同一规范化绝对文件路径只保留首次成功登记的内容；同一内存来源 ID 也保留首次成功快照，ID 区分大小写。
-- 内存来源按 ID 区分大小写排序，先于文件来源执行。API 登记的文件与自动发现的文件统一按路径排序，不以调用时间获取优先级。
+- 推荐在调用方的 `ci_on_initialize` 中**同步提交**。此时 CI 类型已可查询，且所有第一轮通知均会在 UDE 的第二轮通知之前结束。
+- 无需查询 TDB 的纯文件声明也可以在 `CI_REGISTER_PROVIDER` 阶段提交；该阶段本身不允许 VM/RF SDK 操作。它不是唯一允许的登记时机。
+- UDE 在 `ci_on_post_initialize` 进入 `FinalizeRegistration` 时关闭 API 窗口，随后扫描固定目录、合并排序、绑定类型并安装 hook。不要在自己的 `ci_on_post_initialize`、异步任务、普通 RF 初始化或游戏运行中回调里提交。
+- 返回 `true` 只表示**语法解析和登记成功**，不表示类型绑定、资源加载或实际应用成功。绑定失败会记录 `rejected source=`；窗口关闭后的调用返回 `false`。
+- 接口同步保存快照，返回后可释放输入字符串。同一规范化绝对路径保留首次成功内容；内存来源 ID 区分大小写，同 ID 也保留首次成功快照，失败不占用 ID。
+- 内存来源按 ID 区分大小写排序，先于文件来源执行；API 文件与扫描文件统一按路径排序。不以登记调用先后决定覆盖优先级。
 
-调用方与 UDE、ClassInjector 使用配套发行接口。对于纯配置 Mod，分发 JSON 而不增加专用 DLL，通常更简单。
+### 10.2 CI 到原生 USER 的调用时序
+
+```text
+CI 收集 provider 的函数/枚举与类型声明
+  → 准备 TDB、原生入口、自定义虚表
+  → 全部 provider 执行 ci_on_initialize
+       调用方提交 UDE JSON（允许查询 CI 元数据）
+  → 全部 provider 执行 ci_on_post_initialize
+       UDE: FinalizeRegistration → 验证声明 → InstallLoadingHook
+  → 游戏继续静态构造和正常资源加载
+  → 某个 USER 的内部对象图实际完成解码
+       匹配资源 URI + 精确根类型 → 准备并提交字段修改
+  → 原生 onLoad 使用修改后的数据构建运行时缓存
+```
+
+同一轮各 provider 的先后不是跨插件协议；**两轮之间的边界**才保证第一轮提交早于 UDE 关闭登记。UDE 本身只导出后置通知，不需要一个空的前置通知。接口登记不主动加载所有 target，不重放 `onLoad`，也不直接补写原生缓存。
+
+### 10.3 可编译的 C++ 提交示例
+
+下面的零类型 provider 提交第 4 节的水枪配置。使用 C++20、Windows x64；include 路径加入 `plugins/ClassInjector/include` 和 `plugins/UserDataExtension`。同目录安装 `ExamplePlugin.dll` 与空的 `ExamplePlugin.toml`，并安装配套的 UDE DLL/TOML。示例不依赖 RF SDK，也不需要链接 UDE 导入库。
+
+不要假定 UDE 与调用方属于同一个 MO2 Mod 或同一物理目录：按**游戏可见的绝对路径**显式加载并解析公开导出。不能只按调用方 DLL 的物理目录寻找依赖，也不为此修改全局 DLL 搜索路径或依赖 TOML 文件名字母顺序。下面沿用 [EnemyRegistry 的已用加载方式](https://github.com/kassent/EnemyRegistry/blob/main/plugins/EnemyRegistry/Plugin.cpp)。
+
+```cpp
+#include <Windows.h>
+#include <ci/Provider.hpp>
+#include <UserDataExtension.h>
+#include <cstdio>
+#include <exception>
+#include <filesystem>
+#include <iterator>
+
+CI_REGISTER_PROVIDER(registration) {
+    // Zero-type provider: no VM or RF SDK access here.
+}
+
+extern "C" __declspec(dllexport)
+void ci_on_initialize(const ci::ProviderContext* context) noexcept {
+    (void)context;
+    try {
+        wchar_t executablePath[32768]{};
+        const auto length = GetModuleFileNameW(
+            nullptr, executablePath, static_cast<DWORD>(std::size(executablePath)));
+        if (!length || length >= std::size(executablePath)) {
+            std::fputs("ExamplePlugin: game executable path unavailable\n", stderr);
+            return;
+        }
+        const auto modulePath = std::filesystem::path(executablePath).parent_path()
+            / L"reframework" / L"plugins" / L"UserDataExtension.dll";
+        const auto module = LoadLibraryExW(modulePath.c_str(), nullptr,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+        if (!module) {
+            std::fprintf(stderr, "ExamplePlugin: UDE load failed (%lu)\n", GetLastError());
+            return;
+        }
+        // Retain this loader reference for the process lifetime.
+        using FnRegisterJson = decltype(&RegisterUserDataExtensionJson);
+        const auto registerJson = reinterpret_cast<FnRegisterJson>(
+            GetProcAddress(module, "RegisterUserDataExtensionJson"));
+        if (!registerJson) {
+            std::fputs("ExamplePlugin: UDE JSON export missing\n", stderr);
+            return;
+        }
+        const char* declaration = R"json({
+            "format": "UserDataExtension/v1",
+            "extensions": [{
+                "target": "GameDesign/Player/ActionData/Common/GlobalParam/PlayerGlobalParam.user",
+                "patches": [{
+                    "app.user_data.PlayerGlobalParam": {
+                        "_GestureWaterGunMaxAmmo": {"op": "set", "value": 255},
+                        "_GestureWaterGun_Range": {"op": "set", "value": 80.0}
+                    }
+                }]
+            }]
+        })json";
+        if (!registerJson("ExamplePlugin/WaterGun", declaration)) {
+            std::fputs("ExamplePlugin: UDE declaration rejected; check UDE log\n", stderr);
+            return;
+        }
+        std::fputs("ExamplePlugin: UDE declaration registered\n", stderr);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "ExamplePlugin: startup failed: %s\n", error.what());
+    } catch (...) {
+        std::fputs("ExamplePlugin: startup failed\n", stderr);
+    }
+}
+```
+
+`GetModuleFileNameW(nullptr, ...)` 取得游戏 EXE 路径，不是 provider DLL 路径；在 MO2 下仍通过游戏视图解析相对安装位置。加载引用保留到进程结束，不在回调后卸载 UDE。`decltype` 从公共头取得准确导出签名，没有直接函数调用，因此不产生对 UDE 的静态 PE 导入。若实际项目有自己的日志设施，替换示例的 stderr 输出。
+
+纯 JSON Mod 不需要这段 DLL；不要同时安装同一示例 JSON 与该 provider 来重复声明。生成器可将自己的 JSON 字符串传给同一接口，并使用扩展专属、稳定的来源 ID。
+
+### 10.4 内部声明模型与 JSON 兼容
+
+维护 UDE 本体或编写相关测试时，当前内部结构为：
+
+```text
+ConfigurationDeclaration.resourcePatches
+  → ResourcePatch { resourceUri, typePatches }
+    → TypePatch { rootTypeName, rootType, fieldEdits }
+      → FieldEdit { fieldPath, fieldPathSteps, kind, value, items,
+                    identityKey, identityKeySteps }
+```
+
+JSON v1 **不改名**：`extensions/target` 映射为资源声明，`patches` 映射为类型批次，字段字典中的 `op/value/items/key` 映射为扁平 `FieldEdit`。`identityKey` 是 append 的去重身份，不是目标字段路径；不恢复 `Operation` 包装或旧类型别名。
+
+路径步骤在解析时只保存语法，元数据验证使用 `ValidateTypePatch`，每次已解码对象的实际字段地址按现场类型解析；执行使用 `PatchExecutor::ApplyTypePatch`。同一类型批次仍先定位、准备，再提交，不因改名改变批次失败与引用持有语义，也不增加全局字段布局缓存。
+
+实现入口：[Plugin.cpp](plugins/UserDataExtension/Plugin.cpp)、[配置与登记](plugins/UserDataExtension/UserDataConfiguration.cpp)、[原生解码分发](plugins/UserDataExtension/UserDataLoading.cpp)、[批次执行器](plugins/UserDataExtension/UserDataPatchExecutor.cpp)。配套 CI **SDK ABI3**；更新宿主时须同步实例全部 provider，而不只是 UDE。详细 ABI 与对象/资源所有权见 [CI 指南第 10 节](https://github.com/kassent/REClassInjector/blob/main/README.zh-CN.md#10-初始化与-provider-sdk-api)。
 
 ## 11. 排错、更新与发布
 
@@ -624,6 +734,7 @@ python generate_ude.py
 | 日志片段 | 含义 |
 |---|---|
 | `Registered` | 配置来源已收集 |
+| `configuration registration window has closed` | 提交发生在 UDE 关闭登记之后；改为调用方 `ci_on_initialize` 内同步提交 |
 | `Order=` | 最终来源执行顺序 |
 | `rejected source=` | 类型/操作校验失败，查看具体原因 |
 | `Applied` | 字段操作已执行；追加包含 added/skipped 数量 |

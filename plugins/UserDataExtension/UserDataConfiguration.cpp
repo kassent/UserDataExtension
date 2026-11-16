@@ -13,39 +13,39 @@
 #include <utility>
 
 namespace UserDataExtension {
-// JSON DTO 只负责字段映射；操作语义和互斥参数由 ReadOperation 显式校验。
-struct OperationJson {
+// JSON DTO 保留 v1 控制键；业务模型在 ReadFieldEdit 中展开为扁平字段修改。
+struct FieldEditJson {
     std::string op;
     Json items;
     Json value;
     std::string key;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(OperationJson, op, items, value, key)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(FieldEditJson, op, items, value, key)
 
-static constexpr std::array operationNames{"append", "set", "add", "sub", "mul", "div", "min", "max"};
+static constexpr std::array fieldEditNames{"append", "set", "add", "sub", "mul", "div", "min", "max"};
 
 // 把 JSON 操作名转换为执行枚举；未知名字在登记阶段报错，加载时不再解析字符串。
-OperationKind ParseOperationKind(std::string_view name) {
-    const auto found = std::ranges::find(operationNames, name);
-    if (found == operationNames.end())
+FieldEditKind ParseFieldEditKind(std::string_view name) {
+    const auto found = std::ranges::find(fieldEditNames, name);
+    if (found == fieldEditNames.end())
         throw std::runtime_error("unknown operation: " + std::string(name));
-    return static_cast<OperationKind>(found - operationNames.begin());
+    return static_cast<FieldEditKind>(found - fieldEditNames.begin());
 }
 
 // 把已解析的操作枚举还原为固定名称，供错误和应用日志使用。
-const char* GetOperationName(OperationKind kind) {
-    return operationNames.at(std::to_underlying(kind));
+const char* GetFieldEditName(FieldEditKind kind) {
+    return fieldEditNames.at(std::to_underlying(kind));
 }
 
-struct ExtensionJson {
+struct ResourcePatchJson {
     std::string target;
     Json patches;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ExtensionJson, target, patches)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ResourcePatchJson, target, patches)
 
 struct DeclarationJson {
     std::string format;
-    std::vector<ExtensionJson> extensions;
+    std::vector<ResourcePatchJson> extensions;
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DeclarationJson, format, extensions)
 
@@ -182,30 +182,35 @@ static void ValidateObjectValue(const Json& value) {
 
 // 读取一条操作，区分 append 的 items/key 与 set/算术的 value 参数。
 // 先验证声明形状，再缓存操作枚举及 key 路径步骤，避免加载时重复解析。
-static Operation ReadOperation(const Json& value) {
+static FieldEdit ReadFieldEdit(const std::string& fieldPath, const Json& value) {
     ValidateControlKeys(value, {"op", "items", "value", "key"}, "operation");
     if (!value.contains("op") || !value.at("op").is_string())
         throw std::runtime_error("operation requires a string op");
-    auto description = value.get<OperationJson>();
-    Operation operation{.kind = ParseOperationKind(description.op), .items = std::move(description.items), .value = std::move(description.value), .key = std::move(description.key)};
-    if (operation.kind == OperationKind::Append) {
-        if (!value.contains("items") || !operation.items.is_array() || operation.items.empty() || value.contains("value"))
+    auto description = value.get<FieldEditJson>();
+    FieldEdit fieldEdit{.fieldPath = fieldPath,
+                        .kind = ParseFieldEditKind(description.op),
+                        .value = std::move(description.value),
+                        .items = std::move(description.items),
+                        .identityKey = std::move(description.key)};
+    if (fieldEdit.kind == FieldEditKind::Append) {
+        if (!value.contains("items") || !fieldEdit.items.is_array() || fieldEdit.items.empty() || value.contains("value"))
             throw std::runtime_error("append requires nonempty items and does not accept value");
-        if (value.contains("key") && (operation.key.empty() || operation.key.find('\0') != operation.key.npos))
+        if (value.contains("key") && (fieldEdit.identityKey.empty() || fieldEdit.identityKey.find('\0') != fieldEdit.identityKey.npos))
             throw std::runtime_error("append key must be nonempty when present");
-        for (const auto& item : operation.items)
+        for (const auto& item : fieldEdit.items)
             ValidateObjectValue(item);
     } else {
         if (!value.contains("value") || value.contains("items") || value.contains("key"))
             throw std::runtime_error("set/arithmetic requires value and does not accept append parameters");
-        if (operation.kind == OperationKind::Set)
-            ValidateObjectValue(operation.value);
-        else if (!operation.value.is_number() && !operation.value.is_string())
+        if (fieldEdit.kind == FieldEditKind::Set)
+            ValidateObjectValue(fieldEdit.value);
+        else if (!fieldEdit.value.is_number() && !fieldEdit.value.is_string())
             throw std::runtime_error("arithmetic value must be a number or decimal integer string");
     }
-    if (!operation.key.empty() && operation.key != "$uri")
-        operation.keySteps = ParseFieldPath(operation.key);
-    return operation;
+    if (!fieldEdit.identityKey.empty() && fieldEdit.identityKey != "$uri")
+        fieldEdit.identityKeySteps = ParseFieldPath(fieldEdit.identityKey);
+    fieldEdit.fieldPathSteps = ParseFieldPath(fieldPath);
+    return fieldEdit;
 }
 
 // 把文件或内存 JSON 解析为有序扩展声明；任一语法或结构错误使整份登记失败。
@@ -230,23 +235,23 @@ static ConfigurationDeclaration ParseDeclarationJson(std::string_view text) {
     ConfigurationDeclaration file;
     for (size_t index = 0; index < declaration.extensions.size(); ++index) {
         ValidateControlKeys(json.at("extensions").at(index), {"target", "patches"}, "extension");
-        const auto& extensionJson = declaration.extensions[index];
-        ValidateTarget(extensionJson.target);
-        if (!extensionJson.patches.is_array() || extensionJson.patches.empty())
+        const auto& resourcePatchJson = declaration.extensions[index];
+        ValidateTarget(resourcePatchJson.target);
+        if (!resourcePatchJson.patches.is_array() || resourcePatchJson.patches.empty())
             throw std::runtime_error("extension requires nonempty patches");
-        Extension extension{.target = NormalizeUserDataUri(extensionJson.target)};
-        for (const auto& patchJson : extensionJson.patches) {
+        ResourcePatch resourcePatch{.resourceUri = NormalizeUserDataUri(resourcePatchJson.target)};
+        for (const auto& patchJson : resourcePatchJson.patches) {
             if (!patchJson.is_object() || patchJson.size() != 1 || patchJson.begin().key().empty() || patchJson.begin().key().find('\0') != std::string::npos || !patchJson.begin().value().is_object() || patchJson.begin().value().empty())
                 throw std::runtime_error("patch requires one root type key and a nonempty operation dictionary");
-            Patch patch{.typeName = patchJson.begin().key()};
+            TypePatch typePatch{.rootTypeName = patchJson.begin().key()};
             for (const auto& [field, operationJson] : patchJson.begin().value().items()) {
                 if (field.empty() || field.find('\0') != field.npos)
                     throw std::runtime_error("operation field path must be nonempty without NUL");
-                patch.fields.push_back({field, ReadOperation(operationJson), ParseFieldPath(field)});
+                typePatch.fieldEdits.push_back(ReadFieldEdit(field, operationJson));
             }
-            extension.patches.push_back(std::move(patch));
+            resourcePatch.typePatches.push_back(std::move(typePatch));
         }
-        file.extensions.push_back(std::move(extension));
+        file.resourcePatches.push_back(std::move(resourcePatch));
     }
     return file;
 }
@@ -280,11 +285,11 @@ bool ConfigurationRegistry::RegisterFile(const std::filesystem::path& path) noex
             return !file.path.empty() && SameConfigurationPath(file.path, normalizedPath);
         });
         if (found != declarations.end()) {
-            found->fromApi = true;
+            found->fromAPI = true;
             return true;
         }
         auto file = ReadDeclarationFile(normalizedPath);
-        file.fromApi = true;
+        file.fromAPI = true;
         declarations.push_back(std::move(file));
         _MESSAGE("[UserDataExtension] Registered source=API path=%s", PathUtf8(normalizedPath).c_str());
         return true;
@@ -313,7 +318,7 @@ bool ConfigurationRegistry::RegisterJson(const char* sourceIdUtf8, const char* j
             return true;
         auto declaration = ParseDeclarationJson(jsonUtf8);
         declaration.sourceId = sourceIdUtf8;
-        declaration.fromApi = true;
+        declaration.fromAPI = true;
         declarations.push_back(std::move(declaration));
         _MESSAGE("[UserDataExtension] Registered source=JSON id=%s", sourceIdUtf8);
         return true;
@@ -402,7 +407,7 @@ std::vector<ConfigurationDeclaration> ConfigurationRegistry::FinalizeRegistratio
     });
     for (size_t index = 0; index < collected.size(); ++index) {
         const auto& file = collected[index];
-        _MESSAGE("[UserDataExtension] Order=%zu source=%s%s name=%s", index, !file.sourceId.empty() ? "JSON" : (file.fromApi ? "API" : ""), file.fromDirectory ? (file.fromApi ? "+Directory" : "Directory") : "", GetConfigurationSource(file).c_str());
+        _MESSAGE("[UserDataExtension] Order=%zu source=%s%s name=%s", index, !file.sourceId.empty() ? "JSON" : (file.fromAPI ? "API" : ""), file.fromDirectory ? (file.fromAPI ? "+Directory" : "Directory") : "", GetConfigurationSource(file).c_str());
     }
     return collected;
 }

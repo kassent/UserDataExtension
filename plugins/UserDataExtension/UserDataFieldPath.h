@@ -1,5 +1,5 @@
 #pragma once
-#include "ClassProvider.h"
+#include <ci/API.hpp>
 #include <nlohmann/json.hpp>
 #include <span>
 #include <string>
@@ -27,7 +27,7 @@ struct FieldPathStep {
 struct FieldLocation {
     void* owner{};
     void* address{};
-    const ci::Type* type{};
+    ci::TypeDefinitionHandle type{};
     uint32_t valueSize{};
     // 经过的引用槽地址；用于检测同批次父引用替换与子字段写入冲突。
     std::vector<void*> ancestorReferenceSlots;
@@ -35,9 +35,9 @@ struct FieldLocation {
 
 // 只解析路径语法为字段/下标/匹配步骤；非法或不完整路径抛异常，不访问对象。
 std::vector<FieldPathStep> ParseFieldPath(std::string_view path);
-// 仅用元数据校验路径；type=null 表示须待实际派生元素检查，不代表缺字段成功。
-ci::FieldLayout ValidateFieldPath(const ci::ProviderContext& context, const ci::Type* rootType, std::span<const FieldPathStep> steps);
+// 仅用元数据校验路径并返回末端类型；nullptr 表示须待实际派生元素检查。
+ci::TypeDefinitionHandle ValidateFieldPath(const ci::SDKAPI& context, ci::TypeDefinitionHandle rootType, std::span<const FieldPathStep> steps);
 // 在当前已解码对象图上定位借用字段槽及真实 owner；保留祖先槽用于批次冲突检测。
 // 拒绝跨入 externalObjects 中的未解码 USER，不自动创建缺失父对象或等待资源。
-FieldLocation ResolveFieldPath(const ci::ProviderContext& context, void* vmContext, void* root, std::span<const FieldPathStep> steps, std::span<void* const> externalObjects = {});
+FieldLocation ResolveFieldPath(const ci::SDKAPI& context, void* vmContext, void* root, std::span<const FieldPathStep> steps, std::span<void* const> externalObjects = {});
 } // namespace UserDataExtension

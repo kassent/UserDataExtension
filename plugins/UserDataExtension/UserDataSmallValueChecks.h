@@ -2,6 +2,7 @@
 #include "UserDataCollection.h"
 #include "UserDataObjectBuilder.h"
 #include "UserDataPatchExecutor.h"
+#include <ci/API.hpp>
 #include <cstring>
 #include <stdexcept>
 
@@ -10,28 +11,28 @@ namespace UserDataSmallValueTests {
 using Json = nlohmann::json;
 
 // 从字段字典组装生产执行器使用的 patch，不经过第二套实现。
-inline UserDataExtension::Patch MakePatch(const ci::ProviderContext& context, const char* type, const Json& fields) {
+inline UserDataExtension::TypePatch MakeTypePatch(const ci::SDKAPI& context, const char* rootTypeName, const Json& fieldDeclarations) {
     using namespace UserDataExtension;
-    Patch patch{.typeName = type, .rootType = context.GetType(type)};
-    for (const auto& [path, description] : fields.items()) {
-        Operation operation{.kind = ParseOperationKind(description.at("op").get<std::string>())};
+    TypePatch typePatch{.rootTypeName = rootTypeName, .rootType = context.tdb->find_type(rootTypeName)};
+    for (const auto& [path, description] : fieldDeclarations.items()) {
+        FieldEdit fieldEdit{.fieldPath = path, .fieldPathSteps = ParseFieldPath(path), .kind = ParseFieldEditKind(description.at("op").get<std::string>())};
         if (description.contains("value"))
-            operation.value = description.at("value");
+            fieldEdit.value = description.at("value");
         if (description.contains("items"))
-            operation.items = description.at("items");
+            fieldEdit.items = description.at("items");
         if (description.contains("key")) {
-            operation.key = description.at("key").get<std::string>();
-            if (operation.key != "$uri")
-                operation.keySteps = ParseFieldPath(operation.key);
+            fieldEdit.identityKey = description.at("key").get<std::string>();
+            if (fieldEdit.identityKey != "$uri")
+                fieldEdit.identityKeySteps = ParseFieldPath(fieldEdit.identityKey);
         }
-        patch.fields.push_back({.fieldPath = path, .operation = std::move(operation), .pathSteps = ParseFieldPath(path)});
+        typePatch.fieldEdits.push_back(std::move(fieldEdit));
     }
-    return patch;
+    return typePatch;
 }
 
 // 按生产字段路径读取纯值，用于核对真实 VM 与离线元数据两种后端。
 template <class T>
-inline T Read(const ci::ProviderContext& context, void* vmctx, void* root, const std::string& path) {
+inline T Read(const ci::SDKAPI& context, void* vmctx, void* root, const std::string& path) {
     const auto field = UserDataExtension::ResolveFieldPath(context, vmctx, root, UserDataExtension::ParseFieldPath(path));
     if (field.valueSize != sizeof(T))
         throw std::runtime_error("unexpected read layout: " + path);
@@ -42,7 +43,7 @@ inline T Read(const ci::ProviderContext& context, void* vmctx, void* root, const
 
 // 验证纯值写入、List 原生 Add、数组拼接、padding/正负零去重和不支持类型的边界。
 // vmctx 必须来自真实托管调用作用域；离线替身后端允许传 nullptr。
-inline Json Run(const ci::ProviderContext& context, void* vmctx) {
+inline Json Run(const ci::SDKAPI& context, void* vmctx) {
     using namespace UserDataExtension;
     size_t checks = 0;
     auto Check = [&checks](bool value, const char* reason) {
@@ -62,15 +63,15 @@ inline Json Run(const ci::ProviderContext& context, void* vmctx) {
     std::vector<void*> roots;
     ObjectBuilder builder(context, vmctx);
     auto Create = [&](const Json& declaration) {
-        auto* root = builder.CreateObject(context.GetType(declaration.begin().key().c_str()), declaration);
-        context.Retain(root); // 完整初始化后才首次持有。
+        auto* root = builder.CreateObject(context.tdb->find_type(declaration.begin().key().c_str()), declaration);
+        context.managed_object->add_ref(root); // 完整初始化后才首次持有。
         roots.push_back(root);
         return root;
     };
     auto Apply = [&](void* root, const char* type, const Json& fields) {
-        const auto patch = MakePatch(context, type, fields);
-        ValidatePatch(context, patch);
-        PatchExecutor(context, vmctx, root).ApplyPatch(patch, "SmallValueChecks");
+        const auto typePatch = MakeTypePatch(context, type, fields);
+        ValidateTypePatch(context, typePatch);
+        PatchExecutor(context, vmctx, root).ApplyTypePatch(typePatch, "SmallValueChecks");
     };
     auto Collection = [&](void* root, const std::string& path) {
         const auto field = ResolveFieldPath(context, vmctx, root, ParseFieldPath(path));
@@ -79,11 +80,11 @@ inline Json Run(const ci::ProviderContext& context, void* vmctx) {
     try {
         const char* types[]{"via.vec2", "via.vec3", "via.vec4", "via.Quaternion", "via.Float2", "via.Float3", "via.Float4", "via.Color", "via.Range", "via.RangeI", "app.MOTION_SEQUENCE_FILTER_ID", "System.Nullable`1<System.Int32>", "System.Nullable`1<System.UInt32>"};
         for (const auto* name : types) {
-            const auto* type = context.GetType(name);
+            const auto* type = context.tdb->find_type(name);
             const auto* layout = FindSupportedValueLayout(context, type);
-            Check(layout && layout->size == context.GetValueTypeSize(type), "small value type/size missing");
+            Check(layout && layout->size == context.type_definition->get_valuetype_size(type), "small value type/size missing");
         }
-        Check(context.GetValueTypeSize(context.GetType("System.String")) == 0 && context.GetValueTypeSize(nullptr) == 0, "CI value-size query accepted reference/null");
+        Check(context.type_definition->get_valuetype_size(context.tdb->find_type("System.String")) == 0 && context.type_definition->get_valuetype_size(nullptr) == 0, "CI value-size query accepted reference/null");
         const auto samples = Json::parse(R"(
         [
             {
@@ -174,22 +175,22 @@ inline Json Run(const ci::ProviderContext& context, void* vmctx) {
         ]
         )");
         for (const auto& sample : samples) {
-            const auto* type = context.GetType(sample.begin().key().c_str());
+            const auto* type = context.tdb->find_type(sample.begin().key().c_str());
             const auto size = GetSupportedValueSize(context, type);
             alignas(16) uint8_t bytes[16]{};
             ValidateJsonValue(context, type, size, sample);
             builder.WriteValue(nullptr, bytes, type, size, sample);
             for (const auto& [name, expected] : sample.begin().value().items()) {
-                const auto* member = context.GetFieldLayout(type, name.c_str());
-                if (member->type == context.GetType("System.Single")) {
+                const auto member = ci::API::TypeDefinition{&context, type}.find_field(name.c_str());
+                if (member.get_type().handle == context.tdb->find_type("System.Single")) {
                     float value;
-                    std::memcpy(&value, bytes + member->valueOffset, sizeof(value));
+                    std::memcpy(&value, bytes + member.get_offset_from_fieldptr(), sizeof(value));
                     Check(value == expected.get<float>(), "float value encoding failed");
-                } else if (member->type == context.GetType("System.Boolean")) {
-                    Check(bool(bytes[member->valueOffset]) == expected.get<bool>(), "Boolean value encoding failed");
+                } else if (member.get_type().handle == context.tdb->find_type("System.Boolean")) {
+                    Check(bool(bytes[member.get_offset_from_fieldptr()]) == expected.get<bool>(), "Boolean value encoding failed");
                 } else {
                     uint32_t value;
-                    std::memcpy(&value, bytes + member->valueOffset, sizeof(value));
+                    std::memcpy(&value, bytes + member.get_offset_from_fieldptr(), sizeof(value));
                     Check(value == expected.get<uint32_t>(), "integer value encoding failed");
                 }
             }
@@ -260,7 +261,7 @@ inline Json Run(const ci::ProviderContext& context, void* vmctx) {
         }
         )"));
         Check(Read<float>(context, vmctx, cloth, "_Gravity.x") == 10 && Read<float>(context, vmctx, cloth, "_Gravity.y") == 9, "member set damaged adjacent value");
-        const auto bad = MakePatch(context, "app.user_data.UnderwaterClothParameter", Json::parse(R"(
+        const auto bad = MakeTypePatch(context, "app.user_data.UnderwaterClothParameter", Json::parse(R"(
         {
             "_ForceCoef": {
                 "op": "set",
@@ -277,11 +278,11 @@ inline Json Run(const ci::ProviderContext& context, void* vmctx) {
         }
         )"));
         Reject([&] {
-            PatchExecutor(context, vmctx, cloth).ApplyPatch(bad, "prepare-failure");
+            PatchExecutor(context, vmctx, cloth).ApplyTypePatch(bad, "prepare-failure");
         });
         Check(Read<float>(context, vmctx, cloth, "_ForceCoef") == 0 && Read<float>(context, vmctx, cloth, "_Gravity.x") == 10, "failed preparation committed partial writes");
         Reject([&] {
-            ValidatePatch(context, MakePatch(context, "app.user_data.UnderwaterClothParameter", Json::parse(R"(
+            ValidateTypePatch(context, MakeTypePatch(context, "app.user_data.UnderwaterClothParameter", Json::parse(R"(
             {
                 "_Gravity": {
                     "op": "add",
@@ -402,7 +403,7 @@ inline Json Run(const ci::ProviderContext& context, void* vmctx) {
         Check(!Read<bool>(context, vmctx, attack, data + "RequestSetID._HasValue") && Read<int32_t>(context, vmctx, attack, data + "ShellIndex._Value") == 7, "Nullable set failed");
         Check(Read<float>(context, vmctx, attack, data + "Obb.extent.x") == 99, "existing large-value member support regressed");
         Reject([&] {
-            GetSupportedValueSize(context, context.GetType("via.OBB"));
+            GetSupportedValueSize(context, context.tdb->find_type("via.OBB"));
         });
         Json replace;
         replace[pos] = {{"op", "set"}, {"value", Json::parse(R"(
@@ -527,7 +528,7 @@ inline Json Run(const ci::ProviderContext& context, void* vmctx) {
         }
         )"));
         const auto originalColors = Collection(hunterEffect, "_AmuletColors");
-        const auto colorPatch = MakePatch(context, "app.cHunterEffect", Json::parse(R"(
+        const auto colorPatch = MakeTypePatch(context, "app.cHunterEffect", Json::parse(R"(
         {
             "_AmuletColors": {
                 "op": "append",
@@ -547,15 +548,15 @@ inline Json Run(const ci::ProviderContext& context, void* vmctx) {
         }
         )"));
         Reject([&] {
-            ValidatePatch(context, colorPatch);
+            ValidateTypePatch(context, colorPatch);
         });
         PatchExecutor colorExecutor(context, vmctx, hunterEffect);
-        colorExecutor.ApplyPatch(colorPatch, "ColorList");
+        colorExecutor.ApplyTypePatch(colorPatch, "ColorList");
         const auto colorsView = Collection(hunterEffect, "_AmuletColors");
         Check(colorsView.count == 2 && colorsView.list == originalColors.list, "Color List append count/owner mismatch");
         // 先验长再读元素；追加回归时测试应明确失败，而不是越界读取第二项。
         Check(Read<uint32_t>(context, vmctx, hunterEffect, "_AmuletColors[0].rgba") == 123 && Read<uint32_t>(context, vmctx, hunterEffect, "_AmuletColors[1].rgba") == 456, "production Color List.Add indirect ABI failed");
-        colorExecutor.ApplyPatch(colorPatch, "ColorList");
+        colorExecutor.ApplyTypePatch(colorPatch, "ColorList");
         Check(Collection(hunterEffect, "_AmuletColors").count == 2, "Color List append replay was not idempotent");
 
         auto* actionArg = Create(Json::parse(R"(
@@ -578,7 +579,7 @@ inline Json Run(const ci::ProviderContext& context, void* vmctx) {
             }
         }
         )"));
-        const auto nullablePatch = MakePatch(context, "app.cHunterSubActionArg", Json::parse(R"(
+        const auto nullablePatch = MakeTypePatch(context, "app.cHunterSubActionArg", Json::parse(R"(
         {
             "_MarkedValue": {
                 "op": "append",
@@ -600,18 +601,18 @@ inline Json Run(const ci::ProviderContext& context, void* vmctx) {
         }
         )"));
         PatchExecutor nullableExecutor(context, vmctx, actionArg);
-        nullableExecutor.ApplyPatch(nullablePatch, "NullableArray");
+        nullableExecutor.ApplyTypePatch(nullablePatch, "NullableArray");
         Check(Collection(actionArg, "_MarkedValue").count == 3, "Nullable empty values were not deduplicated");
         Check(!Read<bool>(context, vmctx, actionArg, "_MarkedValue[0]._HasValue") && Read<int32_t>(context, vmctx, actionArg, "_MarkedValue[0]._Value") == 123 && Read<bool>(context, vmctx, actionArg, "_MarkedValue[2]._HasValue") && Read<int32_t>(context, vmctx, actionArg, "_MarkedValue[2]._Value") == 7, "Nullable append changed inactive payload or lost new value");
-        nullableExecutor.ApplyPatch(nullablePatch, "NullableArray");
+        nullableExecutor.ApplyTypePatch(nullablePatch, "NullableArray");
         Check(Collection(actionArg, "_MarkedValue").count == 3, "Nullable append replay was not idempotent");
         Json result{{"checks", checks}, {"types", std::size(types)}, {"vec3_stride", 16}, {"list_identity_preserved", true}, {"passed", true}};
         for (auto* root : roots)
-            context.Release(root);
+            context.managed_object->release(root);
         return result;
     } catch (...) {
         for (auto* root : roots)
-            context.Release(root);
+            context.managed_object->release(root);
         throw;
     }
 }

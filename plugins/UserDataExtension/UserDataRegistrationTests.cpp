@@ -73,12 +73,12 @@ int main() {
         };
         // 1. 声明本身：合法解析、操作名/路径缓存、未知参数、非法 target 与重复 JSON 键。
         const auto read = ReadDeclarationFile(declarationPath);
-        Check(read.extensions.size() == 1 && read.extensions[0].target == "gamedesign/fixture/fixture.user", "logical target normalization failed");
-        Check(read.extensions[0].patches[0].typeName == "app.FixtureUserData" && read.extensions[0].patches[0].fields[0].operation.value == 10, "type-key/field-dictionary parsing failed");
-        const auto& field = read.extensions[0].patches[0].fields[0];
-        Check(field.operation.kind == OperationKind::Set && field.pathSteps.size() == 1 && field.pathSteps[0].fieldName == "_Value", "operation enum or parsed field path missing");
+        Check(read.resourcePatches.size() == 1 && read.resourcePatches[0].resourceUri == "gamedesign/fixture/fixture.user", "logical target normalization failed");
+        Check(read.resourcePatches[0].typePatches[0].rootTypeName == "app.FixtureUserData" && read.resourcePatches[0].typePatches[0].fieldEdits[0].value == 10, "type-key/field-dictionary parsing failed");
+        const auto& field = read.resourcePatches[0].typePatches[0].fieldEdits[0];
+        Check(field.kind == FieldEditKind::Set && field.fieldPathSteps.size() == 1 && field.fieldPathSteps[0].fieldName == "_Value", "operation enum or parsed field path missing");
         for (const auto* name : {"append", "set", "add", "sub", "mul", "div", "min", "max"})
-            Check(std::string_view(GetOperationName(ParseOperationKind(name))) == name, "operation name/enum round trip failed");
+            Check(std::string_view(GetFieldEditName(ParseFieldEditKind(name))) == name, "operation name/enum round trip failed");
         auto declaration = MakeDeclaration();
         declaration["unknown"] = true;
         CheckRejected(declaration);
@@ -123,7 +123,26 @@ int main() {
         declaration["extensions"][0]["patches"][0]["app.FixtureUserData"]["_Reference"] = {{"op", "set"}, {"value", {{"app.FixtureUserData", {{"$uri", "GameDesign/Fixture.user"}}}}}};
         declaration["extensions"][0]["patches"][0]["app.FixtureUserData"]["_Items"] = {{"op", "append"}, {"key", "_Id"}, {"items", Json::array({{{"app.FixtureRow", {{"_Id", 1}, {"_Index", "$index"}, {"_Nested", {{"app.FixtureValue", {{"_Value", 2}}}}}}}}})}};
         WriteText(declarationPath, declaration.dump());
-        Check(ReadDeclarationFile(declarationPath).extensions[0].patches[0].fields.size() == 3, "typed objects and resource metadata were rejected");
+        const auto parsedFields = ReadDeclarationFile(declarationPath);
+        const auto& fieldEdits = parsedFields.resourcePatches[0].typePatches[0].fieldEdits;
+        Check(fieldEdits.size() == 3, "typed objects and resource metadata were rejected");
+        const auto appendedField = std::ranges::find_if(fieldEdits, [](const FieldEdit& fieldEdit) {
+            return fieldEdit.fieldPath == "_Items";
+        });
+        Check(appendedField != fieldEdits.end() && appendedField->kind == FieldEditKind::Append && appendedField->items.size() == 1 && appendedField->value.is_null(), "flattened append payload was not preserved");
+        Check(appendedField->identityKey == "_Id" && appendedField->identityKeySteps.size() == 1 && appendedField->identityKeySteps[0].fieldName == "_Id", "append identity key path was not preserved");
+        Check(appendedField->fieldPathSteps.size() == 1 && appendedField->fieldPathSteps[0].fieldName == "_Items", "field edit target path was not preserved");
+
+        // v1 的控制键不变；资源与类型批次仍保持数组顺序，绑定前不伪造类型句柄。
+        auto multiplePatches = declaration;
+        multiplePatches["extensions"][0]["patches"].push_back({{"app.FixtureUserData", {{"_Value", {{"op", "add"}, {"value", 3}}}}}});
+        multiplePatches["extensions"].push_back({{"target", "GameDesign/Fixture/Other.user"}, {"patches", MakeDeclaration()["extensions"][0]["patches"]}});
+        WriteText(declarationPath, multiplePatches.dump());
+        const auto parsedPatches = ReadDeclarationFile(declarationPath);
+        Check(parsedPatches.resourcePatches.size() == 2 && parsedPatches.resourcePatches[1].resourceUri == "gamedesign/fixture/other.user", "resource patch URI or declaration order changed");
+        const auto& typePatches = parsedPatches.resourcePatches[0].typePatches;
+        Check(typePatches.size() == 2 && typePatches[0].fieldEdits.size() == 3 && typePatches[1].fieldEdits[0].kind == FieldEditKind::Add, "type patch batch boundaries or order changed");
+        Check(typePatches[0].rootTypeName == "app.FixtureUserData" && !typePatches[0].rootType && !typePatches[1].rootType, "configuration parsing unexpectedly bound runtime root types");
 
         const auto gameRoot = directory / "Game";
         CreateDirectory(gameRoot);
@@ -171,7 +190,7 @@ int main() {
         const auto mixed = std::ranges::find_if(files, [&](const ConfigurationDeclaration& file) {
             return file.path == apiPath;
         });
-        Check(mixed != files.end() && mixed->fromApi && mixed->fromDirectory && mixed->extensions[0].patches[0].fields[0].operation.value == 10, "mixed-source dedupe lost the first successful content");
+        Check(mixed != files.end() && mixed->fromAPI && mixed->fromDirectory && mixed->resourcePatches[0].typePatches[0].fieldEdits[0].value == 10, "mixed-source dedupe lost the first successful content");
         Check(!registry.RegisterFile(declarationPath), "late API registration was accepted");
         ConfigurationRegistry missingDirectoryRegistry;
         Check(missingDirectoryRegistry.FinalizeRegistration(directory / "MissingGame").empty(), "missing fixed directory was treated as a fatal error");
@@ -202,7 +221,7 @@ int main() {
         const auto memorySources = memoryRegistry.FinalizeRegistration(directory / "MissingGame");
         Check(memorySources.size() == 6 && memorySources[0].sourceId == "A" && memorySources[1].sourceId == "B" && memorySources[3].sourceId == "a" && memorySources.back().path == declarationPath, "memory source ID or memory-before-file order failed");
         const auto& snapshot = memorySources[1];
-        Check(snapshot.path.empty() && snapshot.sourceId == "B" && snapshot.extensions[0].patches[0].fields[0].operation.value == 10, "registration borrowed caller buffers or synthesized a file path");
+        Check(snapshot.path.empty() && snapshot.sourceId == "B" && snapshot.resourcePatches[0].typePatches[0].fieldEdits[0].value == 10, "registration borrowed caller buffers or synthesized a file path");
         Check(GetConfigurationSource(snapshot) == "B" && !memoryRegistry.RegisterJson("B", jsonText.c_str()), "source identity or closed memory registration window failed");
         // 4. 两种 C ABI 共用登记表，内容接口不借用缓冲，也不访问来源 ID 对应的路径。
         Check(!RegisterUserDataExtension(nullptr) && !RegisterUserDataExtension("") && !RegisterUserDataExtension("relative.json") && !RegisterUserDataExtension("\xC3\x28"), "C ABI accepted invalid path input");
@@ -212,7 +231,7 @@ int main() {
         Check(RegisterUserDataExtensionJson("ABI", jsonText.c_str()), "JSON C ABI registration failed");
         const auto apiFiles = GetConfigurationRegistry().FinalizeRegistration(directory / "MissingGame");
         Check(apiFiles.size() == 3 && apiFiles[0].sourceId == "ABI" && apiFiles[0].path.empty() && std::ranges::all_of(apiFiles, [](const ConfigurationDeclaration& file) {
-                  return file.fromApi;
+                  return file.fromAPI;
               }),
               "C ABI did not use the shared registration registry");
         Check(!RegisterUserDataExtensionJson("late", jsonText.c_str()), "JSON C ABI accepted registration after finalization");
