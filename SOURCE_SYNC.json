@@ -1,11 +1,8 @@
 {
   "sourceRepository": "https://github.com/kassent/mhwilds",
-  "sourceCommit": "30bcbe1b8eaa29fa0a06cb0028ecdd1f64a8738a",
-  "sourceWorkingTreeChanges": {
-    "plugins/UserDataExtension/DEVELOPER_GUIDE.en.md": "77fd2af063dc7ef644b34edad1ba1a9ad843e2006d7c67a960cd5233731d42b5",
-    "plugins/UserDataExtension/DEVELOPER_GUIDE.md": "28bb224a0cec68c9bbb8ed69a488bc48768c99b8bcb632124f5451e6f138a4af"
-  },
-  "commonCommit": "e7f816cef21dbe7db5bd2cbb0173269aaaa49093",
+  "sourceCommit": "165b3421688e3c1311240b33db65c4da2816d0f8",
+  "sourceWorkingTreeChanges": {},
+  "commonCommit": "3caf9b19ed6325569798a42a8432917100ffff60",
   "sdkABI": 3,
   "files": {
     "README.md": {
@@ -94,8 +91,8 @@
     },
     "plugins/UserDataExtension/UserDataFieldPath.cpp": {
       "sourcePath": "plugins/UserDataExtension/UserDataFieldPath.cpp",
-      "sha256": "63ada3528b765ff21edf7143f16276669442e3f2d4034b68dcd77e47457ea0e7",
-      "sourceSha256": "63ada3528b765ff21edf7143f16276669442e3f2d4034b68dcd77e47457ea0e7",
+      "sha256": "7bba094c0e4848e2409a3d6c3852262b8cfbfde6acafd32495035cc40b69acc4",
+      "sourceSha256": "7bba094c0e4848e2409a3d6c3852262b8cfbfde6acafd32495035cc40b69acc4",
       "adapted": false
     },
     "plugins/UserDataExtension/UserDataFieldPath.h": {
@@ -130,8 +127,8 @@
     },
     "plugins/UserDataExtension/UserDataPatchExecutor.cpp": {
       "sourcePath": "plugins/UserDataExtension/UserDataPatchExecutor.cpp",
-      "sha256": "c9ede9ca93152c0f3b9d1a99addcad8e4429c86e632fe7cdbef2b02ee6839813",
-      "sourceSha256": "c9ede9ca93152c0f3b9d1a99addcad8e4429c86e632fe7cdbef2b02ee6839813",
+      "sha256": "f04b70e2d620cd1d4113e266ba07cb9111cca3141bacc6d1b7140cbc628126b1",
+      "sourceSha256": "f04b70e2d620cd1d4113e266ba07cb9111cca3141bacc6d1b7140cbc628126b1",
       "adapted": false
     },
     "plugins/UserDataExtension/UserDataPatchExecutor.h": {

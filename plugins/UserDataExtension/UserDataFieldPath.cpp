@@ -122,7 +122,9 @@ static ci::TypeDefinitionHandle ValidatePathType(const ci::SDKAPI& context, ci::
                 if (step.key == "$uri") {
                     if (!context.type_definition->is_derived_from(elementType, userDataType) || !step.value.is_string())
                         throw std::runtime_error("$uri selector requires USER elements and a string");
-                    NormalizeUserDataUri(step.value.get<std::string>());
+                    const auto uri = NormalizeUserDataUri(step.value.get<std::string>());
+                    if (uri.empty() || uri.contains('\0'))
+                        throw std::runtime_error("$uri selector requires a nonempty URI without NUL");
                     continue;
                 }
                 if (layout.valueSize)

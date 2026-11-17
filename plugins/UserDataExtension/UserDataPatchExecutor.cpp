@@ -198,6 +198,9 @@ static std::string ReadDeclaredElementIdentity(const ci::SDKAPI& context, Object
         return ReadValueIdentity(context, field.type, field.valueSize, bytes);
     }
     if (!field.valueSize && field.type != stringType) {
+        // 对象追加必须先有具体类型声明，再读取字段或 $uri 身份；绑定和延迟准备共用。
+        if (!field.value->is_object() || field.value->size() != 1)
+            throw std::runtime_error("object append items must declare their non-null concrete type");
         if (fieldEdit.identityKey == "$uri")
             return NormalizeUserDataUri(field.value->begin().value().at("$uri").get<std::string>());
         field = ResolveDeclaredFieldPath(context, builder, field, fieldEdit.identityKeySteps);
@@ -362,8 +365,6 @@ void ValidateTypePatch(const ci::SDKAPI& context, const TypePatch& typePatch) {
                 ReadDeclaredElementIdentity(context, builder, {.type = elementType, .valueSize = elementSize, .value = &item}, fieldEdit);
                 if (elementSize || elementType == stringType)
                     continue;
-                if (!item.is_object() || item.size() != 1)
-                    throw std::runtime_error("object append items must declare their non-null concrete type");
                 // ExcelUserData.cData[] 等基类集合允许派生行声明自己的身份字段。
                 const auto* rowType = context.tdb->find_type(item.begin().key().c_str());
                 if (fieldEdit.identityKey == "$uri") {
