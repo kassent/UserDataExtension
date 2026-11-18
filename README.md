@@ -3,17 +3,11 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
 [Build from source / 从源码构建](BUILDING.md)
 
-**Describe data changes in JSON so that multiple mods can extend the same native USER incrementally.**
-
-UserDataExtension (UDE) is a USER data-extension plugin for Monster Hunter Wilds mod authors. When the game loads a USER, UDE applies JSON declarations to append entries, change fields, or perform arithmetic. **It does not rewrite native USER files on disk or require a complete replacement USER to be distributed.**
-
-For ordinary data changes, authors only need JSON configuration; each mod does not need its own DLL. Using ClassInjector's early loading capability, UDE applies configuration after native data decoding and before the corresponding `onLoad()` initialization, allowing subsequent native initialization to consume the modified data.
-
-Supported environment: **Monster Hunter Wilds, Windows x64, TDB81**. Matching ClassInjector and UserDataExtension release files are required.
+UserDataExtension (UDE) uses JSON to append USER entries and edit fields in **Monster Hunter Wilds (Windows x64, TDB81)**. Install matching ClassInjector and UDE runtimes. A data-only mod supplies JSON.
 
 ## Contents
 
-- [1. Why Use UDE?](#1-why-use-ude)
+- [1. What to Configure](#1-what-to-configure)
 - [2. Features and Use Cases](#2-features-and-use-cases)
 - [3. Installation and File Layout](#3-installation-and-file-layout)
 - [4. Quick Start](#4-quick-start)
@@ -24,66 +18,12 @@ Supported environment: **Monster Hunter Wilds, Windows x64, TDB81**. Matching Cl
 - [9. Editing and Generation from a Public JSON Database](#9-editing-and-generation-from-a-public-json-database)
 - [10. Plugin Developer API](#10-plugin-developer-api)
 - [11. Troubleshooting, Updates, and Distribution](#11-troubleshooting-updates-and-distribution)
-- [12. Frequently Asked Questions](#12-frequently-asked-questions)
 
-## 1. Why Use UDE?
+## 1. What to Configure
 
-### 1.1 Reduce Conflicts Between Mods Editing the Same File
+Use UDE to add records to shared USER tables or change specific fields. Ship JSON containing just the changes for your mod. Independent changes can coexist on the same USER; the [loading order](#8-loading-order-and-multi-mod-cooperation) determines how overlapping operations combine.
 
-Traditional resource replacement typically distributes an entire modified USER. If Mod A and Mod B replace the same path, the higher-priority replacement usually wins. Even when A edits one row and B edits another, replacing the whole file can discard one mod's changes.
-
-UDE changes the deliverable from an entire modified file to a description of the required operations:
-
-```text
-Native shared USER
-  +-- Mod A: append its own entries
-  +-- Mod B: change one field in another record
-  +-- Mod C: append other independent entries
-                    |
-                    v
-The same loaded USER object contains the compatible changes
-```
-
-Each mod supplies its own JSON files. Independent operations run on the same native data object in a defined order, without requiring a premerged USER containing every mod's changes.
-
-**This reduces whole-file replacement conflicts; it does not eliminate every logical conflict.** Mods may still compete for an ID, write the same field, or require mutually exclusive rules. UDE supplies explicit operation semantics, deterministic ordering, and source-aware logs; authors still coordinate the intended behavior.
-
-### 1.2 Keep Native Files Intact and Use the Game's Current Data Baseline
-
-UDE modifies loaded data in memory, not native USER files in the game installation. Authors do not need to redistribute a complete binary table for a small field change. Users can stop applying a change by removing its configuration and restarting the game.
-
-Unchanged data continues to come from the resource the game actually loads. For example, if an update adds a built-in record while your configuration adjusts one field in another record, your mod does not overwrite that addition by shipping an older complete table.
-
-### 1.3 Reduce Maintenance After Game Updates
-
-A complete USER replacement is often tied to the resource version used to create it. After an update changes layouts, built-in content, or resource validation information, the old file may need to be exported, merged, and saved again.
-
-UDE expresses intent through logical resource paths, type names, and field names, then applies operations to the currently loaded data. Compared with distributing an older resource, this makes it easier to preserve unrelated game updates and review only the fields and entries the mod depends on.
-
-Compatibility still depends on the target contract: **resource renames, field/type changes, changed IDs, and changed field semantics all require review**. Prefer stable IDs or GUIDs over physical array positions that may be reordered.
-
-### 1.4 Edit JSON Instead of Maintaining Binary Differences
-
-JSON works with ordinary text editors and is suitable for version control, review, and scripted generation:
-
-- A numeric change directly shows the field path, operation, and new value.
-- Text diffs communicate intent during collaboration.
-- Scripts can generate large sets of similarly structured entries without repetitive binary-editor work.
-- Public JSON databases help locate resources, types, fields, and existing records, shortening the path from data inspection to configuration authoring.
-
-JSON makes editing more convenient, but authors still need to understand field semantics. UDE checks types and whether operations can execute; the consuming game system determines their effects.
-
-### 1.5 Comparison with Whole-File Replacement
-
-| Aspect | Complete USER replacement | UDE incremental configuration |
-|---|---|---|
-| Deliverable | An entire modified resource | Required field operations and new data |
-| Multiple mods targeting one path | One file typically overrides another | Independent operations can coexist on one object |
-| Native files | Install replacement resources/packages | No rewriting or redistribution of the entire target native USER |
-| Update maintenance | Often requires re-exporting and merging the table | Review target paths, types, fields, and behavior for compatibility |
-| Editing | Resource editing/conversion tools | Text editors, JSON tools, and scripts |
-| Conflict granularity | Primarily file-level | Fields, record identities, and game rules |
-| Best fit | Independent resources and structural resource authoring | Targeted changes to existing USERs and shared-table extensions |
+UDE applies changes in memory when the game loads the target USER. To remove a configuration, take its files out of the mod and restart the game.
 
 ## 2. Features and Use Cases
 
@@ -101,17 +41,9 @@ JSON makes editing more convenient, but authors still need to understand field s
 | Resource references | Supply references for supported USER, Prefab, and ResourceHolder fields |
 | `"$index"` | Fill an Int32 field in a newly created collection element with its actual index |
 
-### 2.2 Suitable Uses
+### 2.2 Shared Data and Private Resources
 
-- Several mods need to add independent records to the same shared parameter table.
-- A mod changes only a few fields of an existing USER and should not distribute the entire resource.
-- Existing rules need numeric, range, flag, or data-reference adjustments.
-- A maintainable set of data changes should be organized in JSON and generated in batches.
-- Data required by another plugin should be distributed as separate shared-table configuration.
-
-For private configuration wholly owned by a mod, a separate USER is often clearer. Reuse existing shared entries first; use UDE when adding entries or making targeted changes is necessary. UDE does not replace new models, textures, motions, component implementations, or game-system registration.
-
-ClassInjector defines new managed types; UDE constructs data for available types and modifies existing USERs. See the [ClassInjector Developer Guide](https://github.com/kassent/REClassInjector/blob/main/README.md).
+Use UDE for entries and targeted edits in shared tables. Use a separate USER for data entirely owned by your mod. Define any custom managed types with [ClassInjector](https://github.com/kassent/REClassInjector/blob/main/README.md).
 
 ## 3. Installation and File Layout
 
@@ -600,7 +532,7 @@ Review the generated JSON, install the contents of `MyMod/reframework/` preservi
 
 ### 10.1 Registration Contract
 
-Ordinary JSON mods use automatic loading. C++ plugins generating startup configuration use the two C exports in [UserDataExtension.h](plugins/UserDataExtension/UserDataExtension.h), both returning `bool`, using `__cdecl`, and declared `noexcept`:
+C++ providers can submit startup configuration directly. Use matching [CI SDK ABI 3](https://github.com/kassent/REClassInjector/blob/main/README.md#10-initialization-and-the-provider-sdk-api) headers and [UserDataExtension.h](plugins/UserDataExtension/UserDataExtension.h). Both C exports return `bool`, use `__cdecl`, and are declared `noexcept`:
 
 | API | Input | Purpose |
 |---|---|---|
@@ -608,8 +540,8 @@ Ordinary JSON mods use automatic loading. C++ plugins generating startup configu
 | `RegisterUserDataExtensionJson(const char* sourceIdUtf8, const char* jsonUtf8)` | Source ID and NUL-terminated UTF-8 JSON text | Submit generated configuration without an intermediate file |
 
 - Prefer **synchronous submission from `ci_on_initialize`**. CI types can be queried, and all first-round callbacks finish before UDE's second-round callback.
-- Pure file declarations that need no TDB queries can also be submitted during `CI_REGISTER_PROVIDER`. That stage must not access the VM/RF SDK; it is not the only registration opportunity.
-- UDE closes the API window in `FinalizeRegistration` during `ci_on_post_initialize`, then scans directories, combines and sorts sources, binds types, and installs the hook. Do not submit from your own post callback, asynchronous tasks, ordinary RF initialization, or in-game callbacks.
+- If you only register files and do not need TDB queries, you can also submit from `CI_REGISTER_PROVIDER`.
+- UDE closes registration during `ci_on_post_initialize`. Submit before your provider’s `ci_on_initialize` returns.
 - `true` means **syntax parsing and registration succeeded**, not successful type binding, resource loading, or application. Binding failures log `rejected source=`. Calls after the window closes return `false`.
 - Inputs are saved as snapshots; release input strings after return. A normalized absolute path keeps its first successful content. In-memory IDs are case-sensitive and keep their first successful snapshot; failed registrations do not claim the ID.
 - In-memory sources sort case-sensitively by ID before file sources. API files and scanned files share path-based ordering. Registration call order does not set override priority.
@@ -622,20 +554,20 @@ CI collects provider function/enum registrations and type declarations
   → Every provider's ci_on_initialize
        Callers submit UDE JSON (CI metadata queries are available)
   → Every provider's ci_on_post_initialize
-       UDE: FinalizeRegistration → validate declarations → InstallLoadingHook
+       UDE closes registration and validates configurations
   → The game continues static construction and normal resource loading
   → A USER's internal object graph actually finishes decoding
        Match resource URI + exact root type → prepare and commit field edits
   → Native onLoad builds runtime caches from the modified data
 ```
 
-Per-provider order within a round is not an inter-plugin protocol. The **boundary between rounds** guarantees first-round submission before UDE closes registration. UDE itself exports only the post notification; an empty first notification is unnecessary. Registration neither loads all targets proactively nor replays `onLoad` or directly fills native caches.
+CI completes the first round for every provider before starting the second. Use callback phases for submission timing and source ordering for application priority.
 
 ### 10.3 Compilable C++ Submission Example
 
 This zero-type provider submits Section 4's Water Gun configuration. Compile as C++20 for Windows x64, adding `plugins/ClassInjector/include` and `plugins/UserDataExtension` to include paths. Install `ExamplePlugin.dll` with an empty same-directory `ExamplePlugin.toml`, plus matching UDE DLL/TOML files. No RF SDK or UDE import library is required.
 
-UDE and its caller may belong to different MO2 mods or physical directories. Explicitly load the **game-visible absolute path** and resolve the public export. Do not search only beside the caller's physical DLL, change global DLL search paths, or depend on manifest filenames. This follows the loading approach already used by [EnemyRegistry](https://github.com/kassent/EnemyRegistry/blob/main/plugins/EnemyRegistry/Plugin.cpp).
+Load UDE using the **game-visible absolute path** and resolve its export. This also works when UDE and the caller are installed as separate MO2 mods.
 
 ```cpp
 #include <Windows.h>
@@ -706,24 +638,6 @@ void ci_on_initialize(const ci::ProviderContext* context) noexcept {
 
 JSON-only mods do not need this DLL. Do not also install the same example JSON and register it twice. Generators can supply their own JSON text through the same API with an extension-specific, stable source ID.
 
-### 10.4 Internal Declarations and JSON Compatibility
-
-For UDE implementation and test contributors, the current internal model is:
-
-```text
-ConfigurationDeclaration.resourcePatches
-  → ResourcePatch { resourceUri, typePatches }
-    → TypePatch { rootTypeName, rootType, fieldEdits }
-      → FieldEdit { fieldPath, fieldPathSteps, kind, value, items,
-                    identityKey, identityKeySteps }
-```
-
-JSON v1 keys **do not change**: `extensions/target` map to resource declarations, `patches` to type batches, and each field's `op/value/items/key` to a flat `FieldEdit`. `identityKey` identifies appended elements for deduplication, not the target field path. There is no extra `Operation` wrapper or old-type alias.
-
-Path steps store syntax during parsing. `ValidateTypePatch` validates metadata, while actual field addresses are resolved against each decoded object's concrete type. `PatchExecutor::ApplyTypePatch` locates and prepares a batch before committing it; the rename preserves failure and reference-ownership behavior and adds no global field-layout cache.
-
-Implementation entries: [Plugin.cpp](plugins/UserDataExtension/Plugin.cpp), [configuration/registration](plugins/UserDataExtension/UserDataConfiguration.cpp), [native decode dispatch](plugins/UserDataExtension/UserDataLoading.cpp), and [batch executor](plugins/UserDataExtension/UserDataPatchExecutor.cpp). Use matching CI **SDK ABI3**; update all providers in an instance together with its host, not UDE alone. See the [CI guide](https://github.com/kassent/REClassInjector/blob/main/README.md#10-initialization-and-the-provider-sdk-api) for ABI and ownership contracts.
-
 ## 11. Troubleshooting, Updates, and Distribution
 
 ### 11.1 Troubleshooting Order
@@ -755,37 +669,3 @@ Check that paths and types still exist, field types and meanings remain compatib
 Distribute JSON in its own group, required additional resources, and documentation covering runtime dependencies, supported game versions, targets, and conflicts. Manage the shared UDE runtime separately from each mod's configuration.
 
 Before release, check the mod by itself, coexistence with other mods, target resource reloads, scene changes, and normal exit. To uninstall, remove the mod's configuration and owned files, then restart; retain shared runtimes required by other mods. Ordinary UDE memory changes are not written back to USER files, but persistent effects triggered through game systems, such as saving, still follow those systems' rules.
-
-## 12. Frequently Asked Questions
-
-### Does UDE Eliminate All Mod Conflicts?
-
-UDE reduces whole-file replacement conflicts and lets independent operations coexist. Competing field writes, shared record identities, same-path JSON files, and mutually exclusive game rules still require coordination.
-
-### Will Configuration Always Survive Game Updates Unchanged?
-
-Configuration applies to currently loaded data, making it easier to preserve game updates. Changes to resources, types, fields, IDs, or rules still require adjustments and testing.
-
-### Do I Need to Extract and Repack the USER?
-
-For supported changes to an existing USER, distribute JSON operations rather than regenerating or packaging that target USER. Understanding fields may require public databases, type information, or inspection tools. New private resources still need normal authoring.
-
-### Can I Copy a Public Database JSON Directly into the Configuration Folder?
-
-Database exports provide structure and reference data. Extract the desired differences and wrap them in UDE's operation format before installation; see Section 9.
-
-### Can `append` Update an Existing Row with the Same ID?
-
-`append` preserves entries with existing identities. To edit a field, use a unique selector with `set` or arithmetic. To append and then adjust, use successive patches.
-
-### Why Did Editing JSON Have No Effect?
-
-Fully restart and enter a feature that loads the target USER. Then use logs to check directories, target paths, types, fields, and results. Reloading Lua or editing a file alone does not recollect UDE configuration.
-
-### Can UDE Define New Types or Generate Gameplay Directly?
-
-ClassInjector registers types, while components or game-system code implement behavior. UDE constructs supported data, requests resource references, and modifies existing USERs. New entries still need their corresponding native consumers and game-system integration.
-
----
-
-**Practical essentials: use current native data as the baseline, express intent as minimal JSON differences, give each mod distinct sources and stable identities, and check final results through the actual game systems.**

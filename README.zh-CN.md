@@ -3,17 +3,11 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
 [Build from source / 从源码构建](BUILDING.md)
 
-**用 JSON 描述需要改变的数据，让多个 Mod 在同一份原生 USER 上进行增量扩展。**
-
-UserDataExtension（UDE）是面向 Monster Hunter Wilds Mod 作者的 USER 数据扩展插件。它在游戏加载 USER 时，根据 JSON 配置追加条目、修改字段或执行数值运算，**不改写磁盘上的游戏原生 USER，也不要求分发一份完整 USER 来覆盖原版资源**。
-
-对普通数据修改，作者只需编写 JSON 配置，无需为每个 Mod 另写 DLL。UDE 通过 ClassInjector 提供的早期加载能力，在原生数据解码完成后、游戏执行相应 `onLoad()` 初始化之前应用配置，使后续原生初始化能够使用修改后的数据。
-
-适用环境：**Monster Hunter Wilds、Windows x64、TDB81**。运行需要配套的 ClassInjector 与 UserDataExtension 发行文件。
+UserDataExtension（UDE）用于在 **《怪物猎人：荒野》（Windows x64／TDB81）**中用 JSON 追加 USER 条目或修改字段。使用配套的 ClassInjector 和 UDE 运行时；纯配置 Mod 只需提供 JSON。
 
 ## 目录
 
-- [1. 为什么使用 UDE](#1-为什么使用-ude)
+- [1. 配置适用范围](#1-配置适用范围)
 - [2. 功能与适用场景](#2-功能与适用场景)
 - [3. 安装与文件组织](#3-安装与文件组织)
 - [4. 快速上手](#4-快速上手)
@@ -24,65 +18,12 @@ UserDataExtension（UDE）是面向 Monster Hunter Wilds Mod 作者的 USER 数�
 - [9. 基于公开 JSON 数据库编辑与生成](#9-基于公开-json-数据库编辑与生成)
 - [10. 插件开发者接口](#10-插件开发者接口)
 - [11. 排错、更新与发布](#11-排错更新与发布)
-- [12. 常见问题](#12-常见问题)
 
-## 1. 为什么使用 UDE
+## 1. 配置适用范围
 
-### 1.1 减少“多个 Mod 修改同一个文件”的冲突
+使用 UDE 向公共 USER 表追加条目，或修改指定字段。发布时提供只包含本 Mod 改动的 JSON。多个 Mod 的独立改动可以作用于同一份 USER；重叠操作按[加载顺序](#8-加载顺序与多-mod-协作)处理。
 
-传统的资源替换通常要求 Mod 分发一份修改过的完整 USER。如果 Mod A 和 Mod B 都替换同一路径，实际加载的往往只有覆盖优先级更高的那一份。即使 A 修改第一行、B 修改另一行，也可能因为整个文件互相覆盖而丢失其中一个 Mod 的效果。
-
-UDE 把交付内容从“整个修改后的文件”变为“我需要做的操作”：
-
-```text
-原生公共 USER
-  ├─ Mod A：追加自己的条目
-  ├─ Mod B：修改另一条记录的一个字段
-  └─ Mod C：追加其他独立条目
-                  ↓
-同一个已加载 USER 对象包含这些可兼容的数据修改
-```
-
-各 Mod 使用自己的 JSON 文件，在同一个原生数据对象上按确定顺序执行增量操作，不必预先制作一份包含所有 Mod 改动的合并 USER。
-
-**这是减少整文件覆盖冲突，不是消除所有逻辑冲突。** 两个 Mod 仍可能争用同一个 ID、修改同一个字段，或对相同规则提出互斥要求。UDE 为这些情况提供明确的操作语义、执行顺序和来源日志，作者仍需协调业务意图。
-
-### 1.2 不覆盖原生文件，保留游戏当前版本的数据基线
-
-UDE 修改的是加载后的内存数据，而不是游戏安装中的原生 USER 文件。作者无需为少量字段修改重新分发完整二进制表，用户也可以通过移除配置并重启游戏来停止应用该修改。
-
-这也使未涉及的数据继续来自游戏实际加载的资源。例如，补丁新增了一条原版记录，而你的配置只调整另一条记录的一个字段，就不必因为分发了旧版整表而把那条新增记录一起覆盖掉。
-
-### 1.3 降低游戏更新后的维护成本
-
-完整 USER 替换包容易绑定制作时的资源版本：游戏更新后，字段布局、原版内容或资源校验信息可能变化，旧文件需要重新导出、合并和保存。
-
-UDE 以逻辑资源路径、类型名和字段名表达修改意图，针对当前加载的数据应用操作。相比重新发布一份旧版资源，它更容易保留新版本中与本 Mod 无关的更新，也便于只检查真正依赖的字段和条目。
-
-更新适应性仍取决于目标契约：**资源改名、字段或类型变化、ID 变更，以及字段业务含义改变，都需要重新核对**。对于有稳定身份的记录，优先按 ID/GUID 等键选择，而不是依赖可能重排的数组下标。
-
-### 1.4 用 JSON 编辑，比维护二进制差异更直接
-
-JSON 可以用常见文本编辑器修改，并适合版本管理、代码审阅和脚本生成：
-
-- 修改一个数值时，可以直接看到字段路径、操作和新值。
-- 多人协作时，文本差异能说明改动意图。
-- 相同结构的大批量条目可以由脚本生成，不必逐项操作二进制编辑器。
-- 可以参考公开 JSON 数据库查找资源、类型、字段和已有记录，缩短从数据分析到配置编写的流程。
-
-JSON 让编辑更方便，但仍需理解字段含义。UDE 校验类型和可执行性，业务效果由游戏消费者决定。
-
-### 1.5 与整文件替换的对比
-
-| 方面 | 完整 USER 替换 | UDE 增量配置 |
-|---|---|---|
-| 交付内容 | 修改后的整个资源 | 所需的字段操作和新增数据 |
-| 同路径多 Mod | 通常由一个文件覆盖另一个 | 可在同一对象上合并独立操作 |
-| 原版文件 | 安装覆盖资源或替换包 | 不改写、不分发该目标的整份原生 USER |
-| 更新维护 | 常需重新导出和合并整表 | 检查目标路径、类型、字段及业务是否仍兼容 |
-| 编辑方式 | 依赖相应资源编辑/转换工具 | 文本编辑器、JSON 工具和脚本 |
-| 冲突粒度 | 主要是文件级 | 字段、记录身份及业务规则级 |
-| 适用范围 | 独立资源、结构性资源制作等 | 已有 USER 的定向修改与公共表扩展 |
+游戏加载目标 USER 时，UDE 在内存中应用修改。移除配置文件并重启游戏即可停止应用该配置。
 
 ## 2. 功能与适用场景
 
@@ -100,17 +41,9 @@ JSON 让编辑更方便，但仍需理解字段含义。UDE 校验类型和可�
 | 资源引用 | 为支持的 USER、Prefab 和 ResourceHolder 字段提供资源引用 |
 | `"$index"` | 在新建集合元素的 Int32 字段中填入该元素的实际下标 |
 
-### 2.2 适合使用的场景
+### 2.2 公共数据与私有资源
 
-- 多个 Mod 都需要向同一张公共参数表添加独立记录。
-- 只修改既有 USER 的少量字段，而不希望交付整份资源。
-- 为已有规则调整数值、范围、开关或数据引用。
-- 用 JSON 组织一组可维护的数据调整，并由脚本批量生成。
-- 配合其他插件，把它们需要的公共表数据作为独立配置交付。
-
-对于 Mod 自己完整拥有的私有配置，通常直接制作独立 USER 更清晰；对于公共数据，优先复用现有条目，需要新增或定向修改时再用 UDE。UDE 不替代新模型、贴图、动作、组件实现或游戏业务注册。
-
-新建托管类型由 ClassInjector 负责，UDE 负责为可用类型构造数据和修改已有 USER。参见 [ClassInjector 开发者指南](https://github.com/kassent/REClassInjector/blob/main/README.zh-CN.md)。
+为共享表追加条目或修改单个字段时使用 UDE。完全由 Mod 管理的私有参数可直接制作独立 USER；自定义托管类型由 [ClassInjector](https://github.com/kassent/REClassInjector/blob/main/README.zh-CN.md) 提供。
 
 ## 3. 安装与文件组织
 
@@ -596,7 +529,7 @@ python generate_ude.py
 
 ### 10.1 登记契约
 
-普通 JSON Mod 使用自动加载即可；需要在启动时生成配置的 C++ 插件使用 [UserDataExtension.h](plugins/UserDataExtension/UserDataExtension.h) 中的两个 C 导出，均返回 `bool`、采用 `__cdecl` 并声明 `noexcept`：
+C++ provider 可直接提交启动配置。使用配套的 [CI SDK ABI 3](https://github.com/kassent/REClassInjector/blob/main/README.zh-CN.md#10-初始化与-provider-sdk-api) 和 [UserDataExtension.h](plugins/UserDataExtension/UserDataExtension.h)。两个 C 导出均返回 `bool`、采用 `__cdecl` 并声明 `noexcept`：
 
 | 接口 | 输入 | 用途 |
 |---|---|---|
@@ -604,8 +537,8 @@ python generate_ude.py
 | `RegisterUserDataExtensionJson(const char* sourceIdUtf8, const char* jsonUtf8)` | 来源 ID 与 NUL 结尾的 UTF-8 JSON 文本 | 直接登记生成的配置，无需中间文件 |
 
 - 推荐在调用方的 `ci_on_initialize` 中**同步提交**。此时 CI 类型已可查询，且所有第一轮通知均会在 UDE 的第二轮通知之前结束。
-- 无需查询 TDB 的纯文件声明也可以在 `CI_REGISTER_PROVIDER` 阶段提交；该阶段本身不允许 VM/RF SDK 操作。它不是唯一允许的登记时机。
-- UDE 在 `ci_on_post_initialize` 进入 `FinalizeRegistration` 时关闭 API 窗口，随后扫描固定目录、合并排序、绑定类型并安装 hook。不要在自己的 `ci_on_post_initialize`、异步任务、普通 RF 初始化或游戏运行中回调里提交。
+- 只提交文件且不查询 TDB 时，也可在 `CI_REGISTER_PROVIDER` 中调用登记接口。
+- UDE 在 `ci_on_post_initialize` 关闭接口；请在本 provider 的 `ci_on_initialize` 返回前完成提交。
 - 返回 `true` 只表示**语法解析和登记成功**，不表示类型绑定、资源加载或实际应用成功。绑定失败会记录 `rejected source=`；窗口关闭后的调用返回 `false`。
 - 接口同步保存快照，返回后可释放输入字符串。同一规范化绝对路径保留首次成功内容；内存来源 ID 区分大小写，同 ID 也保留首次成功快照，失败不占用 ID。
 - 内存来源按 ID 区分大小写排序，先于文件来源执行；API 文件与扫描文件统一按路径排序。不以登记调用先后决定覆盖优先级。
@@ -618,20 +551,20 @@ CI 收集 provider 的函数/枚举与类型声明
   → 全部 provider 执行 ci_on_initialize
        调用方提交 UDE JSON（允许查询 CI 元数据）
   → 全部 provider 执行 ci_on_post_initialize
-       UDE: FinalizeRegistration → 验证声明 → InstallLoadingHook
+       UDE 关闭登记并校验配置
   → 游戏继续静态构造和正常资源加载
   → 某个 USER 的内部对象图实际完成解码
        匹配资源 URI + 精确根类型 → 准备并提交字段修改
   → 原生 onLoad 使用修改后的数据构建运行时缓存
 ```
 
-同一轮各 provider 的先后不是跨插件协议；**两轮之间的边界**才保证第一轮提交早于 UDE 关闭登记。UDE 本身只导出后置通知，不需要一个空的前置通知。接口登记不主动加载所有 target，不重放 `onLoad`，也不直接补写原生缓存。
+CI 完成所有 provider 的第一轮回调后，才开始第二轮。以回调阶段确定提交时机，以来源排序确定应用顺序。
 
 ### 10.3 可编译的 C++ 提交示例
 
 下面的零类型 provider 提交第 4 节的水枪配置。使用 C++20、Windows x64；include 路径加入 `plugins/ClassInjector/include` 和 `plugins/UserDataExtension`。同目录安装 `ExamplePlugin.dll` 与空的 `ExamplePlugin.toml`，并安装配套的 UDE DLL/TOML。示例不依赖 RF SDK，也不需要链接 UDE 导入库。
 
-不要假定 UDE 与调用方属于同一个 MO2 Mod 或同一物理目录：按**游戏可见的绝对路径**显式加载并解析公开导出。不能只按调用方 DLL 的物理目录寻找依赖，也不为此修改全局 DLL 搜索路径或依赖 TOML 文件名字母顺序。下面沿用 [EnemyRegistry 的已用加载方式](https://github.com/kassent/EnemyRegistry/blob/main/plugins/EnemyRegistry/Plugin.cpp)。
+按**游戏可见的绝对路径**加载 UDE 并解析导出。这样 UDE 与调用方可以分别安装在不同的 MO2 Mod 中。
 
 ```cpp
 #include <Windows.h>
@@ -702,24 +635,6 @@ void ci_on_initialize(const ci::ProviderContext* context) noexcept {
 
 纯 JSON Mod 不需要这段 DLL；不要同时安装同一示例 JSON 与该 provider 来重复声明。生成器可将自己的 JSON 字符串传给同一接口，并使用扩展专属、稳定的来源 ID。
 
-### 10.4 内部声明模型与 JSON 兼容
-
-维护 UDE 本体或编写相关测试时，当前内部结构为：
-
-```text
-ConfigurationDeclaration.resourcePatches
-  → ResourcePatch { resourceUri, typePatches }
-    → TypePatch { rootTypeName, rootType, fieldEdits }
-      → FieldEdit { fieldPath, fieldPathSteps, kind, value, items,
-                    identityKey, identityKeySteps }
-```
-
-JSON v1 **不改名**：`extensions/target` 映射为资源声明，`patches` 映射为类型批次，字段字典中的 `op/value/items/key` 映射为扁平 `FieldEdit`。`identityKey` 是 append 的去重身份，不是目标字段路径；不恢复 `Operation` 包装或旧类型别名。
-
-路径步骤在解析时只保存语法，元数据验证使用 `ValidateTypePatch`，每次已解码对象的实际字段地址按现场类型解析；执行使用 `PatchExecutor::ApplyTypePatch`。同一类型批次仍先定位、准备，再提交，不因改名改变批次失败与引用持有语义，也不增加全局字段布局缓存。
-
-实现入口：[Plugin.cpp](plugins/UserDataExtension/Plugin.cpp)、[配置与登记](plugins/UserDataExtension/UserDataConfiguration.cpp)、[原生解码分发](plugins/UserDataExtension/UserDataLoading.cpp)、[批次执行器](plugins/UserDataExtension/UserDataPatchExecutor.cpp)。配套 CI **SDK ABI3**；更新宿主时须同步实例全部 provider，而不只是 UDE。详细 ABI 与对象/资源所有权见 [CI 指南第 10 节](https://github.com/kassent/REClassInjector/blob/main/README.zh-CN.md#10-初始化与-provider-sdk-api)。
-
 ## 11. 排错、更新与发布
 
 ### 11.1 排查顺序
@@ -751,37 +666,3 @@ JSON v1 **不改名**：`extensions/target` 映射为资源声明，`patches` �
 发布内容应包括独立分组内的 JSON、必要的其他资源，以及运行时依赖、支持游戏版本、修改目标和冲突说明。共享 UDE 运行时与各 Mod 的数据配置分开管理。
 
 发布前检查单 Mod 的预期效果、多 Mod 共存、目标资源重新加载以及正常切场景/退出。卸载时删除本 Mod 的配置和自有文件后重启；其他 Mod 仍依赖的共享运行时继续保留。普通 UDE 内存修改不会写回 USER，但通过游戏业务触发的存档等持久化行为仍按该业务规则处理。
-
-## 12. 常见问题
-
-### 是否彻底解决了所有 Mod 冲突？
-
-UDE 降低整文件替换冲突，让独立操作能够共存。同字段争用、相同条目身份、同名 JSON 路径以及互斥业务规则仍需要协调。
-
-### 游戏更新后一定无需修改配置吗？
-
-配置基于当前加载的数据，更容易保留原版更新。但资源、类型、字段、ID 或规则改变时仍需调整并验证。
-
-### 是否需要解包和重新打包 USER？
-
-对于 UDE 支持的已有 USER 数据修改，只交付 JSON 操作，不需要重新生成或打包目标 USER。查明字段含义可能需要公开数据库、类型资料或相应查看工具；新增私有资源仍需正常制作。
-
-### 把公开数据库的 JSON 复制进目录就可以了吗？
-
-数据库导出用来查结构和参考数据。提取差异并封装成 UDE 操作格式后再安装，见第 9 节。
-
-### `append` 能更新同 ID 的已有行吗？
-
-`append` 保留已有身份的记录。要更新字段，使用唯一选择器配合 `set` 或数值运算；要先新增再调整，使用前后两个 patch。
-
-### 编辑 JSON 后为什么没有变化？
-
-完整重启游戏，并进入会加载目标 USER 的功能。随后按日志检查目录、目标路径、类型、字段和操作结果。Lua 重载或编辑文件本身不重新收集 UDE 配置。
-
-### UDE 能定义新类型或直接生成新玩法吗？
-
-类型由 ClassInjector 注册，玩法由组件或业务代码实现。UDE 负责构造适用的数据、请求资源引用和修改已有 USER；新增条目还需对应的原生消费者和业务接入。
-
----
-
-**实践要点：以当前原版数据为基线，用最小 JSON 差异表达意图，为每个 Mod 使用独立来源和稳定身份，并在真实业务中检查最终结果。**
